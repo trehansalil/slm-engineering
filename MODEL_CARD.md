@@ -26,6 +26,8 @@ A 125M-parameter decoder-only transformer trained from scratch on a curated lega
 
 This is a **base model** (no instruction tuning or RLHF). It is intended as a foundation for downstream fine-tuning on legal and financial NLP tasks.
 
+**GitHub:** [trehansalil/slm-engineering](https://github.com/trehansalil/slm-engineering)
+
 ## Model Details
 
 | | |
