@@ -65,6 +65,9 @@ def generate(model, tokenizer, prompt_ids: list[int],
              top_k: int = 50, top_p: float = 0.9) -> str:
     device = next(model.parameters()).device
     max_ctx = getattr(model.config, "max_position_embeddings", 1024)
+    if len(prompt_ids) >= max_ctx:
+        print(f"Warning: prompt ({len(prompt_ids)} tokens) fills the context window ({max_ctx}), truncating prompt")
+        prompt_ids = prompt_ids[-(max_ctx - 2):]
     if len(prompt_ids) + max_new_tokens > max_ctx:
         max_new_tokens = max(1, max_ctx - len(prompt_ids))
     input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)

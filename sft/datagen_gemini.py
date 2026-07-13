@@ -262,13 +262,16 @@ def run_filters(raw_path: str) -> dict:
         tfidf = vectorizer.fit_transform(questions)
 
         keep_mask = [True] * len(valid)
-        for i in range(len(valid)):
-            if not keep_mask[i]:
-                continue
-            sims = cosine_similarity(tfidf[i:i+1], tfidf[i+1:])[0]
-            for j, sim in enumerate(sims, start=i+1):
-                if keep_mask[j] and sim > 0.85:
-                    keep_mask[j] = False
+        batch_size = 500
+        for start in range(0, len(valid), batch_size):
+            end = min(start + batch_size, len(valid))
+            sims = cosine_similarity(tfidf[start:end], tfidf)
+            for i in range(end - start):
+                if not keep_mask[start + i]:
+                    continue
+                for j in range(start + i + 1, len(valid)):
+                    if keep_mask[j] and sims[i, j] > 0.85:
+                        keep_mask[j] = False
 
         valid = [item for item, keep in zip(valid, keep_mask) if keep]
     stats["after_dedup"] = len(valid)

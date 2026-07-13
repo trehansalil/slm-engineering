@@ -126,9 +126,11 @@ def tokenize_sft_data() -> dict:
         all_labels.append(labels)
 
     if not all_input_ids:
-        print("ERROR: no valid examples after tokenization")
-        return {"total_examples": len(examples), "tokenized": 0,
-                "truncated": skipped_long, "skipped_short": skipped_short}
+        raise ValueError(
+            f"No valid examples after tokenization ({len(examples)} input, "
+            f"{skipped_short} too short, {skipped_long} truncated). "
+            "Check SFT data quality or token length thresholds."
+        )
 
     input_ids_arr = np.array(all_input_ids, dtype=np.int32)
     labels_arr = np.array(all_labels, dtype=np.int32)
