@@ -60,7 +60,7 @@ graph TD
     end
 
     subgraph "<b>Inference</b>"
-        I --> K["<b>Phase 9</b><br/>PyTorch · CPU / MPS<br/><code>make chat</code>"]
+        I --> K["<b>Phase 9</b><br/>PyTorch · MPS / CUDA / CPU<br/><code>make chat</code>"]
         J --> K
         I --> L["<b>Phase 9</b><br/>CoreML · Apple Silicon · KV cached<br/><code>make chat-coreml</code>"]
         J --> L
@@ -109,7 +109,7 @@ Legal-first mix (~40/40/20), **2.04B tokens** after cleaning and deduplication:
 
 ### Supervised Fine-Tuning
 
-6.7K grounded Q&A pairs (filtered from ~10.5K raw) generated via Azure OpenAI + Gemini Flash, passed through a 5-stage gauntlet (format validation, TF-IDF dedup, grounding check, task balance, target cap).
+6.7K grounded Q&A pairs (filtered from ~10.5K raw) generated via Azure OpenAI + Gemini Flash, passed through a 4-stage filter pipeline (format validation, TF-IDF dedup, grounding check, target cap).
 
 |               | Modal (A100)      | Local (Mac MPS)    |
 | ------------- | ----------------- | ------------------ |
@@ -146,7 +146,7 @@ pip install torch transformers coremltools numpy
 ### Chat
 
 ```bash
-# PyTorch — works on any platform (CPU/MPS)
+# PyTorch — auto-detects device (MPS/CUDA/CPU)
 python inference/chat_pytorch.py --model local_model/sft_best
 
 # CoreML — Apple Silicon only, KV-cached, 56 tok/s
@@ -157,6 +157,9 @@ python inference/chat_coreml.py
 ### Run the Full Pipeline
 
 ```bash
+# Smoke test (optional — validates pipeline with 10 docs/source)
+make smoke
+
 # Pretrain (Modal, ~$12)
 make clean-data                            # Phase 1: stream + clean
 make dedup                                 # Phase 2: dedup + decontaminate
@@ -164,6 +167,7 @@ make tokenizer                             # Phase 3: train BPE tokenizer
 make tokenize                              # Phase 4: pack into 1024-token windows
 make pretrain                              # Phase 5: train on 8x H100
 make upload                                # Phase 6: push to HuggingFace
+make eval                                  # Run final perplexity eval
 
 # SFT data generation (Modal, requires API keys)
 make sft-data-azure                        # Generate Q&A via Azure OpenAI
@@ -173,6 +177,8 @@ make sft-tokenize                          # Tokenize SFT dataset
 # SFT fine-tuning
 make sft-local ARGS="--n-epochs 20"        # Train on Mac (MPS)
 make sft-modal ARGS="--n-epochs 10"        # Train on Modal A100
+make sft-local-fresh                       # SFT from scratch (ignore checkpoints)
+make sft-modal-fresh                       # SFT from scratch on Modal
 
 # Inference
 make chat                                  # PyTorch chat
@@ -184,7 +190,7 @@ SFT targets accept additional arguments via `ARGS`:
 
 ```bash
 make sft-local ARGS="--n-epochs 10 --lr 1e-5 --batch-size 8"
-make sft-modal ARGS="--n-epochs 10 --lr 1e-5"
+make sft-modal ARGS="--n-epochs 10 --lr 1e-5 --batch-size 8 --grad-accum 4"
 ```
 
 ---
@@ -210,7 +216,7 @@ slm-engineering/
 │
 ├── inference/                      Phase 9: serving
 │   ├── convert_coreml.py             PyTorch → CoreML with KV cache
-│   ├── chat_pytorch.py               PyTorch inference (CPU / MPS)
+│   ├── chat_pytorch.py               PyTorch inference (MPS / CUDA / CPU)
 │   └── chat_coreml.py                CoreML inference on Apple Silicon (ANE)
 │
 ├── docs/
@@ -237,7 +243,7 @@ slm-engineering/
 | `--model`             | `local_model/sft_best` | Base model directory                         |
 | `--resume`            | _(auto)_               | Resume from a specific checkpoint            |
 | `--fresh`             | `false`                | Ignore existing checkpoints, train from base |
-| `--n-epochs`          | `20`                   | Number of training epochs                    |
+| `--n-epochs`          | `20`                   | Total training epochs (resumes count toward this) |
 | `--batch-size`        | `16`                   | Micro batch size                             |
 | `--grad-accum`        | `2`                    | Gradient accumulation steps                  |
 | `--lr`                | `2e-5`                 | Peak learning rate                           |
@@ -247,6 +253,18 @@ slm-engineering/
 | `--device`            | _(auto)_               | Force`cpu`, `mps`, or `cuda`           |
 | `--log-every`         | `20`                   | Steps between log lines                      |
 | `--ckpt-every-epochs` | `2`                    | Checkpoint save frequency                    |
+
+**Modal SFT** (`sft/finetune_modal.py`):
+
+| Argument                | Default                  | Description                                  |
+| ----------------------- | ------------------------ | -------------------------------------------- |
+| `--fresh`             | `false`                | Ignore existing checkpoints, train from base |
+| `--n-epochs`          | `20`                   | Total training epochs (resumes count toward this) |
+| `--ckpt-every-epochs` | `2`                    | Checkpoint save frequency                    |
+| `--lr`                | `2e-5`                 | Peak learning rate                           |
+| `--batch-size`        | `16`                   | Micro batch size                             |
+| `--grad-accum`        | `2`                    | Gradient accumulation steps                  |
+| `--weight-decay`      | `0.01`                 | AdamW weight decay                           |
 
 **PyTorch Chat** (`inference/chat_pytorch.py`):
 
