@@ -22,16 +22,16 @@ Most LLM tutorials stop at fine-tuning someone else's model. This project builds
 
 ## Model
 
-| | |
-|---|---|
-| Architecture | LLaMA (decoder-only transformer) |
-| Parameters | 125.8M (tied embeddings) |
-| Layers / Hidden / Heads | 12 / 768 / 12 (MHA, head dim 64) |
-| FFN | SwiGLU, 3,072 intermediate |
-| Context length | 1,024 tokens |
-| Vocabulary | 16,384 (byte-level BPE, custom-trained) |
-| Positional encoding | RoPE (theta = 10,000) |
-| Precision | bfloat16 |
+|                         |                                         |
+| ----------------------- | --------------------------------------- |
+| Architecture            | LLaMA (decoder-only transformer)        |
+| Parameters              | 125.8M (tied embeddings)                |
+| Layers / Hidden / Heads | 12 / 768 / 12 (MHA, head dim 64)        |
+| FFN                     | SwiGLU, 3,072 intermediate              |
+| Context length          | 1,024 tokens                            |
+| Vocabulary              | 16,384 (byte-level BPE, custom-trained) |
+| Positional encoding     | RoPE (theta = 10,000)                   |
+| Precision               | bfloat16                                |
 
 ---
 
@@ -79,11 +79,11 @@ graph TD
 
 Legal-first mix (~40/40/20), **2.04B tokens** after cleaning and deduplication:
 
-| Source | Dataset | Domain | Share |
-|--------|---------|--------|-------|
-| US Case Law | [HFforLegal/case-law](https://huggingface.co/datasets/HFforLegal/case-law) | Legal | ~40% |
-| SEC Filings | [PleIAs/SEC](https://huggingface.co/datasets/PleIAs/SEC) | Financial | ~40% |
-| FineWeb-Edu | [HuggingFaceFW/fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | General | ~20% |
+| Source      | Dataset                                                                               | Domain    | Share |
+| ----------- | ------------------------------------------------------------------------------------- | --------- | ----- |
+| US Case Law | [HFforLegal/case-law](https://huggingface.co/datasets/HFforLegal/case-law)             | Legal     | ~40%  |
+| SEC Filings | [PleIAs/SEC](https://huggingface.co/datasets/PleIAs/SEC)                               | Financial | ~40%  |
+| FineWeb-Edu | [HuggingFaceFW/fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | General   | ~20%  |
 
 **Processing pipeline:**
 
@@ -100,30 +100,30 @@ Legal-first mix (~40/40/20), **2.04B tokens** after cleaning and deduplication:
 
 8x H100 on Modal, single epoch over 2.04B tokens, **19 minutes**.
 
-| Step | Train Loss | Val Loss | Val Perplexity |
-|------|-----------|----------|----------------|
-| 1,000 | 2.80 | 2.81 | 16.54 |
-| 2,000 | 2.55 | 2.53 | 12.56 |
-| 3,000 | 2.44 | 2.42 | 11.29 |
-| 3,500 | 2.38 | 2.41 | **11.08** |
+| Step  | Train Loss | Val Loss | Val Perplexity  |
+| ----- | ---------- | -------- | --------------- |
+| 1,000 | 2.80       | 2.81     | 16.54           |
+| 2,000 | 2.55       | 2.53     | 12.56           |
+| 3,000 | 2.44       | 2.42     | 11.29           |
+| 3,500 | 2.38       | 2.41     | **11.08** |
 
 ### Supervised Fine-Tuning
 
 6.7K grounded Q&A pairs (filtered from ~10.5K raw) generated via Azure OpenAI + Gemini Flash, passed through a 5-stage gauntlet (format validation, TF-IDF dedup, grounding check, task balance, target cap).
 
-| | Modal (A100) | Local (Mac MPS) |
-|---|---|---|
-| Epochs | 10 | 8 (best @ epoch 4) |
-| Best Val Loss | 6.19 (ppl 485.69) | 4.36 (ppl 78.24) |
+|               | Modal (A100)      | Local (Mac MPS)    |
+| ------------- | ----------------- | ------------------ |
+| Epochs        | 10                | 8 (best @ epoch 4) |
+| Best Val Loss | 6.19 (ppl 485.69) | 4.36 (ppl 78.24)   |
 
 ### On-Device Inference
 
 CoreML conversion with KV-cached single-token decode on Apple Silicon:
 
-| Phase | Throughput |
-|-------|-----------|
-| Prefill | 49 tok/s |
-| Decode | **56 tok/s** |
+| Phase   | Throughput         |
+| ------- | ------------------ |
+| Prefill | 49 tok/s           |
+| Decode  | **56 tok/s** |
 
 ---
 
@@ -231,43 +231,43 @@ slm-engineering/
 
 **Local SFT** (`sft/finetune_local.py`):
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--model` | `local_model/sft_best` | Base model directory |
-| `--resume` | _(auto)_ | Resume from a specific checkpoint |
-| `--fresh` | `false` | Ignore existing checkpoints, train from base |
-| `--n-epochs` | `20` | Number of training epochs |
-| `--batch-size` | `16` | Micro batch size |
-| `--grad-accum` | `2` | Gradient accumulation steps |
-| `--lr` | `2e-5` | Peak learning rate |
-| `--min-lr` | `2e-6` | Minimum LR (cosine decay floor) |
-| `--weight-decay` | `0.01` | AdamW weight decay |
-| `--grad-clip` | `1.0` | Max gradient norm |
-| `--device` | _(auto)_ | Force `cpu`, `mps`, or `cuda` |
-| `--log-every` | `20` | Steps between log lines |
-| `--ckpt-every-epochs` | `2` | Checkpoint save frequency |
+| Argument                | Default                  | Description                                  |
+| ----------------------- | ------------------------ | -------------------------------------------- |
+| `--model`             | `local_model/sft_best` | Base model directory                         |
+| `--resume`            | _(auto)_               | Resume from a specific checkpoint            |
+| `--fresh`             | `false`                | Ignore existing checkpoints, train from base |
+| `--n-epochs`          | `20`                   | Number of training epochs                    |
+| `--batch-size`        | `16`                   | Micro batch size                             |
+| `--grad-accum`        | `2`                    | Gradient accumulation steps                  |
+| `--lr`                | `2e-5`                 | Peak learning rate                           |
+| `--min-lr`            | `2e-6`                 | Minimum LR (cosine decay floor)              |
+| `--weight-decay`      | `0.01`                 | AdamW weight decay                           |
+| `--grad-clip`         | `1.0`                  | Max gradient norm                            |
+| `--device`            | _(auto)_               | Force`cpu`, `mps`, or `cuda`           |
+| `--log-every`         | `20`                   | Steps between log lines                      |
+| `--ckpt-every-epochs` | `2`                    | Checkpoint save frequency                    |
 
 **PyTorch Chat** (`inference/chat_pytorch.py`):
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--model` | `local_model/sft_best` | Model directory |
-| `--prompt` | _(interactive)_ | Single prompt (non-interactive mode) |
-| `--system` | _(default)_ | System prompt |
-| `--max-tokens` | `256` | Max tokens to generate |
-| `--temperature` | `0.7` | Sampling temperature |
+| Argument          | Default                  | Description                          |
+| ----------------- | ------------------------ | ------------------------------------ |
+| `--model`       | `local_model/sft_best` | Model directory                      |
+| `--prompt`      | _(interactive)_        | Single prompt (non-interactive mode) |
+| `--system`      | _(default)_            | System prompt                        |
+| `--max-tokens`  | `256`                  | Max tokens to generate               |
+| `--temperature` | `0.7`                  | Sampling temperature                 |
 
 ### Environment Variables
 
 SFT data generation requires API keys configured as [Modal secrets](https://modal.com/docs/guide/secrets):
 
-| Variable | Script | Purpose |
-|----------|--------|---------|
-| `AZURE_API_KEY` | `datagen_azure.py` | Azure OpenAI endpoint key |
-| `AZURE_BASE_URL` | `datagen_azure.py` | Azure OpenAI base URL |
-| `AZURE_API_VERSION` | `datagen_azure.py` | Azure API version string |
-| `AZURE_MODEL` | `datagen_azure.py` | Azure deployment name |
-| `GEMINI_API_KEY` | `datagen_gemini.py` | Google Gemini API key |
+| Variable              | Script                | Purpose                   |
+| --------------------- | --------------------- | ------------------------- |
+| `AZURE_API_KEY`     | `datagen_azure.py`  | Azure OpenAI endpoint key |
+| `AZURE_BASE_URL`    | `datagen_azure.py`  | Azure OpenAI base URL     |
+| `AZURE_API_VERSION` | `datagen_azure.py`  | Azure API version string  |
+| `AZURE_MODEL`       | `datagen_azure.py`  | Azure deployment name     |
+| `GEMINI_API_KEY`    | `datagen_gemini.py` | Google Gemini API key     |
 
 `LOCAL_RANK` is set automatically by `torchrun` during DDP pretraining.
 
@@ -277,24 +277,24 @@ SFT data generation requires API keys configured as [Modal secrets](https://moda
 
 All cloud compute runs on [Modal](https://modal.com)'s serverless platform — no persistent infrastructure, no idle costs. Local training and inference run on Apple Silicon (MPS / ANE).
 
-| Phase | Resource | Wall Time | Cost |
-|-------|----------|-----------|------|
-| Data pipeline (clean, dedup, tokenize) | CPU, 14 shards | ~17 min | $1.57 |
-| Pretraining | 8x H100 (DDP) | 19 min | $10.59 |
-| Eval + HuggingFace upload | L4 | ~1 min | $0.20 |
-| SFT data generation | CPU (Modal) | ~2–3 hrs | ~$2.00 |
-| SFT fine-tuning | A100 or local MPS | ~2–4 hrs | ~$0.50 |
-| **Total** | | | **~$15** |
+| Phase                                  | Resource          | Wall Time | Cost           |
+| -------------------------------------- | ----------------- | --------- | -------------- |
+| Data pipeline (clean, dedup, tokenize) | CPU, 14 shards    | ~17 min   | $1.57          |
+| Pretraining                            | 8x H100 (DDP)     | 19 min    | $10.59         |
+| Eval + HuggingFace upload              | L4                | ~1 min    | $0.20          |
+| SFT data generation                    | CPU (Modal)       | ~2–3 hrs | ~$2.00         |
+| SFT fine-tuning                        | A100 or local MPS | ~2–4 hrs | ~$0.50         |
+| **Total**                        |                   |           | **~$15** |
 
 ---
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [Model Card](docs/MODEL_CARD.md) | HuggingFace model card — architecture, intended use, limitations, license |
-| [Project Summary](docs/PROJECT_SUMMARY.md) | End-to-end technical writeup — data pipeline, training, results, cost breakdown |
-| [Replication Guide](docs/REPLICATION_GUIDE.md) | Step-by-step reproduction with expected outputs at each phase |
+| Document                                      | Description                                                                      |
+| --------------------------------------------- | -------------------------------------------------------------------------------- |
+| [Model Card](docs/MODEL_CARD.md)               | HuggingFace model card — architecture, intended use, limitations, license       |
+| [Project Summary](docs/PROJECT_SUMMARY.md)     | End-to-end technical writeup — data pipeline, training, results, cost breakdown |
+| [Replication Guide](docs/REPLICATION_GUIDE.md) | Step-by-step reproduction with expected outputs at each phase                    |
 
 ---
 
