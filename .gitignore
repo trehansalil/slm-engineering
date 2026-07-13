@@ -8,6 +8,8 @@ __pycache__/
 
 # Model artifacts (large binaries)
 local_model/
+remote_model/*.safetensors
+remote_model/*.bin
 
 # Training data
 data/

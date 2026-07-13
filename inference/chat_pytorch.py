@@ -32,10 +32,10 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
-def load_model(model_dir: str):
+def load_model(model_dir: str, tokenizer_dir: str | None = None):
     print(f"Loading model from {model_dir}...")
     device = get_device()
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir or model_dir)
     model = LlamaForCausalLM.from_pretrained(
         model_dir,
         torch_dtype=torch.float32,
@@ -119,6 +119,8 @@ def main():
     parser = argparse.ArgumentParser(description="Chat with SLM-125M SFT model")
     parser.add_argument("--model", default=DEFAULT_MODEL_DIR,
                         help="Path to model directory")
+    parser.add_argument("--tokenizer", type=str, default=None,
+                        help="Path to tokenizer directory (defaults to --model)")
     parser.add_argument("--prompt", type=str, default=None,
                         help="Single prompt (non-interactive mode)")
     parser.add_argument("--system", type=str, default=SYSTEM_PROMPT,
@@ -129,7 +131,7 @@ def main():
                         help="Sampling temperature")
     args = parser.parse_args()
 
-    model, tokenizer = load_model(args.model)
+    model, tokenizer = load_model(args.model, args.tokenizer)
 
     if args.prompt:
         prompt_ids = build_prompt(tokenizer, args.system, args.prompt)
