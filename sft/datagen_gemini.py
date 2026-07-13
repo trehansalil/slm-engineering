@@ -206,7 +206,7 @@ def generate_batch(batch: list[dict]) -> list[dict]:
                             "answer": pair["answer"].strip(),
                             "source": item["source"],
                             "task_type": item["task_type"],
-                            "passage": item["text"][:500],
+                            "passage": item["text"],
                         })
                 break
             except Exception as e:
@@ -232,7 +232,7 @@ def generate_batch(batch: list[dict]) -> list[dict]:
     memory=8_192,
 )
 def run_filters(raw_path: str) -> dict:
-    """Apply the 5-filter gauntlet to raw Q&A pairs."""
+    """Apply the 4-stage filter pipeline to raw Q&A pairs."""
     import json
 
     from sklearn.feature_extraction.text import TfidfVectorizer
@@ -262,16 +262,13 @@ def run_filters(raw_path: str) -> dict:
         tfidf = vectorizer.fit_transform(questions)
 
         keep_mask = [True] * len(valid)
-        batch_size = 1000
-        for start in range(0, len(valid), batch_size):
-            end = min(start + batch_size, len(valid))
-            batch_sim = cosine_similarity(tfidf[start:end], tfidf[:end])
-            for i in range(end - start):
-                if not keep_mask[start + i]:
-                    continue
-                for j in range(start + i + 1, end):
-                    if keep_mask[j] and batch_sim[i, j] > 0.85:
-                        keep_mask[j] = False
+        for i in range(len(valid)):
+            if not keep_mask[i]:
+                continue
+            sims = cosine_similarity(tfidf[i:i+1], tfidf[i+1:])[0]
+            for j, sim in enumerate(sims, start=i+1):
+                if keep_mask[j] and sim > 0.85:
+                    keep_mask[j] = False
 
         valid = [item for item, keep in zip(valid, keep_mask) if keep]
     stats["after_dedup"] = len(valid)
@@ -365,13 +362,14 @@ def orchestrate_generation() -> dict:
         task_counts[p["task_type"]] = task_counts.get(p["task_type"], 0) + 1
     print(f"Task distribution: {task_counts}")
 
-    # Skip batches already completed in prior runs
+    # Skip batches already completed in prior runs (conservative: round down)
     batch_size = 8
     batches = [passages[i:i + batch_size] for i in range(0, len(passages), batch_size)]
-    batches_to_skip = existing_count // (batch_size * PAIRS_PER_PASSAGE)
-    if batches_to_skip > 0:
-        batches = batches[batches_to_skip:]
-        print(f"Skipping {batches_to_skip} already-completed batches, {len(batches)} remaining")
+    if existing_count > 0:
+        batches_to_skip = existing_count // (batch_size * PAIRS_PER_PASSAGE)
+        if batches_to_skip > 0:
+            batches = batches[batches_to_skip:]
+            print(f"Skipping {batches_to_skip} already-completed batches, {len(batches)} remaining")
 
     print(f"Dispatching {len(batches)} batches ({batch_size} passages each)...")
 

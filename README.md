@@ -88,7 +88,7 @@ Legal-first mix (~40/40/20), **2.04B tokens** after cleaning and deduplication:
 **Processing pipeline:**
 
 1. **Clean** — 6-step deterministic filter (line length, boilerplate, repetition, language, OCR quality, min length)
-2. **Dedup** — exact (blake2b) + near-duplicate removal (MinHash LSH, 128 perms, Jaccard > 0.7)
+2. **Dedup** — exact (blake2b) + near-duplicate removal (MinHash LSH, 32 perms, Jaccard > 0.8)
 3. **Decontaminate** — 13-gram overlap stripping against [CaseHOLD](https://huggingface.co/datasets/casehold/casehold) and [LexGLUE](https://huggingface.co/datasets/coastalcph/lex_glue) eval sets
 4. **Tokenize** — custom 16K BPE tokenizer, packed into uint16 1024-token windows
 
@@ -180,10 +180,11 @@ make convert-coreml                        # Convert to CoreML
 make chat-coreml                           # CoreML chat (Apple Silicon)
 ```
 
-All SFT and Modal targets accept additional arguments via `ARGS`:
+SFT targets accept additional arguments via `ARGS`:
 
 ```bash
-make sft-local-fresh ARGS="--n-epochs 10 --lr 1e-5 --batch-size 8"
+make sft-local ARGS="--n-epochs 10 --lr 1e-5 --batch-size 8"
+make sft-modal ARGS="--n-epochs 10 --lr 1e-5"
 ```
 
 ---

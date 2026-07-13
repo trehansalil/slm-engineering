@@ -26,12 +26,9 @@ VOLUMES = {config.DATA_ROOT: volume}
 
 SFT_DIR = f"{config.DATA_ROOT}/sft"
 SFT_TOKENS_DIR = f"{SFT_DIR}/tokens"
-BASE_CKPT_DIR = f"{config.DATA_ROOT}/checkpoints_10epoch"
 SFT_CKPT_DIR = f"{config.DATA_ROOT}/checkpoints_sft"
 SFT_METRICS_PATH = f"{SFT_CKPT_DIR}/sft_metrics.jsonl"
 SFT_TRAIN_PATH = f"{SFT_DIR}/sft_train.jsonl"
-
-HF_BASE_REPO = "thesreedath/slm-125m-base"
 
 IGNORE_INDEX = -100
 
@@ -128,6 +125,11 @@ def tokenize_sft_data() -> dict:
         all_input_ids.append(input_ids)
         all_labels.append(labels)
 
+    if not all_input_ids:
+        print("ERROR: no valid examples after tokenization")
+        return {"total_examples": len(examples), "tokenized": 0,
+                "truncated": skipped_long, "skipped_short": skipped_short}
+
     input_ids_arr = np.array(all_input_ids, dtype=np.int32)
     labels_arr = np.array(all_labels, dtype=np.int32)
 
@@ -170,6 +172,10 @@ def run_sft(
     n_epochs: int = 20,
     ckpt_every_epochs: int = 2,
     fresh: bool = False,
+    lr: float = 2e-5,
+    batch_size: int = 16,
+    grad_accum: int = 2,
+    weight_decay: float = 0.01,
 ) -> dict:
     """Fine-tune the pre-trained base model on the SFT dataset.
 
@@ -217,22 +223,18 @@ def run_sft(
     print(f"Train: {train_size}, Val: {val_size}")
 
     # ── hyperparams ───────────────────────────────────────────────────
-    lr = 2e-5
-    min_lr = 2e-6
-    batch_size = 16
-    grad_accum = 2
-    weight_decay = 0.01
+    min_lr = lr / 10
     grad_clip = 1.0
     log_every = 20
 
     # ── model: resume or fresh from base ──────────────────────────────
     from huggingface_hub import snapshot_download
 
-    if not os.path.exists(f"{BASE_CKPT_DIR}/config.json"):
-        print(f"Downloading base model from {HF_BASE_REPO}...")
+    if not os.path.exists(f"{config.BASE_CKPT_DIR}/config.json"):
+        print(f"Downloading base model from {config.HF_REPO}...")
         snapshot_download(
-            repo_id=HF_BASE_REPO,
-            local_dir=BASE_CKPT_DIR,
+            repo_id=config.HF_REPO,
+            local_dir=config.BASE_CKPT_DIR,
             ignore_patterns=["*.md", ".gitattributes"],
         )
         volume.commit()
@@ -264,8 +266,8 @@ def run_sft(
             f"{SFT_CKPT_DIR}/epoch_{start_epoch:02d}", torch_dtype=torch.bfloat16,
         )
     else:
-        model = LlamaForCausalLM.from_pretrained(BASE_CKPT_DIR, torch_dtype=torch.bfloat16)
-        print(f"Loaded fresh base model from {HF_BASE_REPO}")
+        model = LlamaForCausalLM.from_pretrained(config.BASE_CKPT_DIR, torch_dtype=torch.bfloat16)
+        print(f"Loaded fresh base model from {config.HF_REPO}")
 
     model = model.to(device=device)
     n_params = sum(p.numel() for p in model.parameters())
@@ -290,7 +292,7 @@ def run_sft(
         return {"status": "already_done", "epochs_completed": start_epoch}
 
     steps_per_epoch = len(train_dl) // grad_accum
-    total_steps = steps_per_epoch * remaining_epochs
+    total_steps = steps_per_epoch * n_epochs
     warmup_steps = min(100, total_steps // 10)
 
     def get_lr(step):
@@ -351,7 +353,7 @@ def run_sft(
     epoch_log.flush()
 
     # ── training loop ─────────────────────────────────────────────────
-    step = 0
+    step = resume_ckpt["step"] if resume_ckpt is not None else 0
     micro = 0
     best_val_loss = init_vl
     avg_train_loss = vl = init_vl
@@ -460,16 +462,23 @@ def run_sft(
 
 
 @app.local_entrypoint()
-def finetune(n_epochs: int = 20, ckpt_every_epochs: int = 2, fresh: bool = False):
+def finetune(n_epochs: int = 20, ckpt_every_epochs: int = 2, fresh: bool = False,
+             lr: float = 2e-5, batch_size: int = 16, grad_accum: int = 2,
+             weight_decay: float = 0.01):
     """Run SFT fine-tuning.
 
     Args:
         n_epochs: Total epochs to train (default 20).
         ckpt_every_epochs: Save checkpoint every N epochs (default 2).
         fresh: Ignore existing SFT checkpoints and start from base model.
+        lr: Peak learning rate (default 2e-5).
+        batch_size: Micro batch size (default 16).
+        grad_accum: Gradient accumulation steps (default 2).
+        weight_decay: AdamW weight decay (default 0.01).
     """
     print(f"Starting SFT: {n_epochs} epochs, ckpt every {ckpt_every_epochs}, "
           f"fresh={fresh}")
-    result = run_sft.remote(n_epochs, ckpt_every_epochs, fresh)
+    result = run_sft.remote(n_epochs, ckpt_every_epochs, fresh, lr, batch_size,
+                            grad_accum, weight_decay)
     import json as json_mod
     print(f"\nDone: {json_mod.dumps(result, indent=2)}")

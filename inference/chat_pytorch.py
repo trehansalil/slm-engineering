@@ -24,17 +24,26 @@ ROLE_TOKENS = {
 }
 
 
+def get_device() -> torch.device:
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
 def load_model(model_dir: str):
     print(f"Loading model from {model_dir}...")
+    device = get_device()
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     model = LlamaForCausalLM.from_pretrained(
         model_dir,
         torch_dtype=torch.float32,
-        device_map="cpu",
     )
+    model = model.to(device)
     model.eval()
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model loaded: {n_params/1e6:.1f}M params")
+    print(f"Model loaded: {n_params/1e6:.1f}M params on {device}")
     return model, tokenizer
 
 
@@ -54,16 +63,21 @@ def build_prompt(tokenizer, system: str, user: str) -> list[int]:
 def generate(model, tokenizer, prompt_ids: list[int],
              max_new_tokens: int = 256, temperature: float = 0.7,
              top_k: int = 50, top_p: float = 0.9) -> str:
-    input_ids = torch.tensor([prompt_ids], dtype=torch.long)
+    device = next(model.parameters()).device
+    max_ctx = getattr(model.config, "max_position_embeddings", 1024)
+    if len(prompt_ids) + max_new_tokens > max_ctx:
+        max_new_tokens = max(1, max_ctx - len(prompt_ids))
+    input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
     eos_id = tokenizer.convert_tokens_to_ids("<|eos|>")
+    do_sample = temperature > 0
 
     output = model.generate(
         input_ids,
         max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p,
-        do_sample=True,
+        temperature=temperature if do_sample else 1.0,
+        top_k=top_k if do_sample else 0,
+        top_p=top_p if do_sample else 1.0,
+        do_sample=do_sample,
         eos_token_id=eos_id,
         pad_token_id=tokenizer.convert_tokens_to_ids("<|pad|>"),
     )

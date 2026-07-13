@@ -33,8 +33,6 @@ MIN_PASSAGE_CHARS = 200
 PAIRS_PER_PASSAGE = 3
 PASSAGES_NEEDED = RAW_TARGET // PAIRS_PER_PASSAGE
 
-AZURE_MODEL = "gpt-5.4-mini"
-
 TASK_DISTRIBUTION = {
     "grounded_qa": 0.50,
     "extraction": 0.20,
@@ -213,7 +211,7 @@ def generate_batch(batch: list[dict]) -> list[dict]:
                             "answer": pair["answer"].strip(),
                             "source": item["source"],
                             "task_type": item["task_type"],
-                            "passage": item["text"][:500],
+                            "passage": item["text"],
                         })
                 break
             except Exception as e:
@@ -238,10 +236,9 @@ def generate_batch(batch: list[dict]) -> list[dict]:
     memory=8_192,
 )
 def run_filters(raw_path: str) -> dict:
-    """Apply the 5-filter gauntlet to raw Q&A pairs."""
+    """Apply the 4-stage filter pipeline to raw Q&A pairs."""
     import json
 
-    import numpy as np
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
 
@@ -269,16 +266,13 @@ def run_filters(raw_path: str) -> dict:
         tfidf = vectorizer.fit_transform(questions)
 
         keep_mask = [True] * len(valid)
-        batch_size = 1000
-        for start in range(0, len(valid), batch_size):
-            end = min(start + batch_size, len(valid))
-            batch_sim = cosine_similarity(tfidf[start:end], tfidf[:end])
-            for i in range(end - start):
-                if not keep_mask[start + i]:
-                    continue
-                for j in range(start + i + 1, end):
-                    if keep_mask[j] and batch_sim[i, j] > 0.85:
-                        keep_mask[j] = False
+        for i in range(len(valid)):
+            if not keep_mask[i]:
+                continue
+            sims = cosine_similarity(tfidf[i:i+1], tfidf[i+1:])[0]
+            for j, sim in enumerate(sims, start=i+1):
+                if keep_mask[j] and sim > 0.85:
+                    keep_mask[j] = False
 
         valid = [item for item, keep in zip(valid, keep_mask) if keep]
     stats["after_dedup"] = len(valid)

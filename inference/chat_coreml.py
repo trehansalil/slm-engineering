@@ -92,7 +92,12 @@ def generate(model, tokenizer, meta, rotary_cos, rotary_sin, causal_mask,
         v_cache = out["new_v_cache"]
         return out["logits"][0, 0, :]
 
-    # Prefill: process prompt tokens
+    # Prefill: process prompt tokens (truncate if beyond context)
+    if len(prompt_ids) >= max_seq:
+        print(f"Warning: prompt ({len(prompt_ids)} tokens) exceeds context ({max_seq}), truncating")
+        prompt_ids = prompt_ids[:max_seq - 1]
+    if not prompt_ids:
+        return "", 0.0, 0.0
     t_prefill = time.time()
     for pos, token_id in enumerate(prompt_ids):
         logits = step(token_id, pos)

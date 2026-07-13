@@ -233,14 +233,20 @@ def main():
 
     # Restore optimizer state if available
     if resume_path and os.path.exists(f"{resume_path}/training_state.pt"):
-        state = torch.load(f"{resume_path}/training_state.pt",
-                           map_location="cpu", weights_only=False)
-        if "optimizer" in state:
-            optimizer.load_state_dict(state["optimizer"])
+        opt_state = torch.load(f"{resume_path}/training_state.pt",
+                               map_location="cpu", weights_only=False)
+        if "optimizer" in opt_state:
+            optimizer.load_state_dict(opt_state["optimizer"])
             print("  Restored optimizer state")
 
+    total_epochs = args.n_epochs
+    remaining_epochs = total_epochs - start_epoch
+    if remaining_epochs <= 0:
+        print(f"Already trained {start_epoch} epochs (target {total_epochs}). Nothing to do.")
+        return
+
     steps_per_epoch = len(train_dl) // args.grad_accum
-    total_steps = steps_per_epoch * args.n_epochs
+    total_steps = steps_per_epoch * total_epochs
     warmup_steps = min(100, total_steps // 10)
 
     def get_lr(step):
@@ -249,7 +255,6 @@ def main():
         ratio = (step - warmup_steps) / max(1, total_steps - warmup_steps)
         return args.min_lr + 0.5 * (args.lr - args.min_lr) * (1.0 + math.cos(math.pi * ratio))
 
-    total_epochs = start_epoch + args.n_epochs
     print(f"\nTraining: epochs {start_epoch+1} -> {total_epochs}, "
           f"{total_steps} steps, batch={args.batch_size}x{args.grad_accum}, lr={args.lr}")
     print(f"Checkpoint every {args.ckpt_every_epochs} epochs")
@@ -278,7 +283,13 @@ def main():
     best_val_loss = init_vl
     t0 = t_global = time.time()
 
-    for epoch_idx in range(args.n_epochs):
+    # Restore step from checkpoint
+    if resume_path and os.path.exists(f"{resume_path}/training_state.pt"):
+        ckpt_state = torch.load(f"{resume_path}/training_state.pt",
+                                map_location="cpu", weights_only=False)
+        step = ckpt_state.get("step", 0)
+
+    for epoch_idx in range(remaining_epochs):
         current_epoch = start_epoch + epoch_idx + 1
         epoch_train_loss = 0.0
         epoch_train_steps = 0
@@ -338,6 +349,7 @@ def main():
         }) + "\n")
         ppl_log.flush()
 
+        saved_ckpt = False
         if vl < best_val_loss:
             best_val_loss = vl
             os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -349,10 +361,11 @@ def main():
                 if os.path.exists(src):
                     shutil.copy2(src, dst)
             save_checkpoint(model, optimizer, current_epoch, step, vl, ppl, args.model)
+            saved_ckpt = True
             print(f"  [best] saved to {OUTPUT_DIR} + checkpoint")
 
-        # Checkpoint every N epochs
-        if current_epoch % args.ckpt_every_epochs == 0:
+        # Checkpoint every N epochs (skip if already saved this epoch)
+        if current_epoch % args.ckpt_every_epochs == 0 and not saved_ckpt:
             save_checkpoint(model, optimizer, current_epoch, step, vl, ppl, args.model)
 
     # Final save

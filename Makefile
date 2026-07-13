@@ -1,5 +1,6 @@
 .PHONY: help smoke clean-data dedup tokenizer tokenize pretrain upload eval \
        sft-data-azure sft-data-gemini sft-tokenize sft-modal sft-local \
+       sft-modal-fresh sft-local-fresh \
        chat chat-coreml convert-coreml
 
 help: ## Show all targets
@@ -54,7 +55,7 @@ sft-modal-fresh: ## SFT from scratch (ignore existing checkpoints)
 sft-local: ## SFT on local Mac (MPS)
 	python sft/finetune_local.py $(ARGS)
 
-sft-local-fresh: ## SFT on local Mac (MPS)
+sft-local-fresh: ## SFT from scratch on local Mac (ignore existing checkpoints)
 	python sft/finetune_local.py --fresh $(ARGS)
 
 # ── Inference ─────────────────────────────────────────────────────
