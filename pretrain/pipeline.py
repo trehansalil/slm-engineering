@@ -1,4 +1,14 @@
-"""Modal App for the from-scratch 125M SLM build (Phases 0 to 4)."""
+"""Modal App for the from-scratch 125M SLM build (Phases 0 to 6).
+
+Usage:
+    modal run pretrain/pipeline.py::clean
+    modal run pretrain/pipeline.py::dedup
+    modal run pretrain/pipeline.py::tokenizer
+    modal run pretrain/pipeline.py::tokenize
+    modal run pretrain/pipeline.py::pretrain
+    modal run pretrain/pipeline.py::upload
+    modal run pretrain/pipeline.py::final_eval
+"""
 
 from __future__ import annotations
 
@@ -20,7 +30,7 @@ _cpu_base = (
         "datasketch==1.6.5",
     )
 )
-cpu_image = _cpu_base.add_local_python_source("config", "cleaning", "dedup")
+cpu_image = _cpu_base.add_local_python_source("config", "pretrain")
 
 volume = modal.Volume.from_name(config.VOLUME_NAME, create_if_missing=True)
 VOLUMES = {config.DATA_ROOT: volume}
@@ -38,7 +48,7 @@ def _stream_source(source: "config.Source", n: int):
 
 @app.function(image=cpu_image, volumes=VOLUMES, timeout=60 * 15)
 def smoke_test(n_per_source: int = 10) -> dict:
-    from cleaning import clean_document
+    from pretrain.cleaning import clean_document
 
     summary: dict[str, dict] = {}
     for source in config.DATA_MIX:
@@ -68,7 +78,7 @@ def smoke_test(n_per_source: int = 10) -> dict:
 
 @app.function(image=cpu_image, volumes=VOLUMES, timeout=60 * 20)
 def measure_sources(n_per_source: int = 2000) -> dict:
-    from cleaning import clean_document
+    from pretrain.cleaning import clean_document
 
     TOTAL_ROWS = {"case-law": 282_390, "sec": 48_543, "fineweb-edu": 9_670_000}
     out: dict[str, dict] = {}
@@ -102,7 +112,7 @@ def clean_shard(source_name: str, url: str, shard_index: int, token_cap: int) ->
 
     from datasets import load_dataset
 
-    from cleaning import clean_document
+    from pretrain.cleaning import clean_document
 
     source = _SOURCE_BY_NAME[source_name]
     out_dir = f"{config.CLEAN_DIR}/{source_name}"
@@ -196,7 +206,7 @@ CLEAN_SHARDS = {"case-law": 10, "sec": 5, "fineweb-edu": 5}
 def _build_contamination_ngrams() -> set:
     from datasets import load_dataset
 
-    from dedup import word_ngrams, words
+    from pretrain.dedup import word_ngrams, words
 
     grams: set = set()
     for hf_id, cfg_name in [("casehold/casehold", None), ("coastalcph/lex_glue", "case_hold")]:
@@ -221,7 +231,7 @@ def minhash_shard(shard_basename: str) -> dict:
     import numpy as np
     from datasketch import MinHash
 
-    from dedup import shingles, words
+    from pretrain.dedup import shingles, words
 
     path = f"{config.CLEAN_DIR}/case-law/{shard_basename}"
     sigs, idxs = [], []
@@ -278,7 +288,7 @@ def write_corpus_shard(source_name: str, shard_basename: str) -> dict:
     import json
     import os
 
-    from dedup import exact_hash, word_ngrams, words
+    from pretrain.dedup import exact_hash, word_ngrams, words
 
     near: set[int] = set()
     if source_name == "case-law":
@@ -359,7 +369,7 @@ def dedup(compute_sigs: bool = True):
 
 # ---- Phase 3: train the 16K byte-level BPE tokenizer ----
 ml_image = _cpu_base.pip_install("transformers==4.46.3").add_local_python_source(
-    "config", "cleaning", "dedup")
+    "config", "pretrain")
 
 
 def _corpus_line_iter():
@@ -510,7 +520,7 @@ def tokenize():
 def ocr_sample(n_docs: int = 3000) -> dict:
     import re
 
-    from cleaning import clean_document
+    from pretrain.cleaning import clean_document
 
     with open("/usr/share/dict/words", encoding="utf-8", errors="ignore") as fh:
         vocab = {w.strip().lower() for w in fh if w.strip().isalpha()}
@@ -569,7 +579,7 @@ gpu_image = (
         "numpy",
         "huggingface_hub",
     )
-    .add_local_file("train_llm.py", "/root/train_llm.py")
+    .add_local_file("pretrain/train_ddp.py", "/root/train_ddp.py")
     .add_local_python_source("config")
 )
 
@@ -587,7 +597,7 @@ def run_pretrain(n_epochs: int = 3):
     env = {**os.environ, "NUM_EPOCHS": str(n_epochs)}
     result = subprocess.run(
         ["torchrun", "--standalone", f"--nproc_per_node={config.PRETRAIN_GPU_COUNT}",
-         "/root/train_llm.py"],
+         "/root/train_ddp.py"],
         env=env, check=True,
     )
     volume.commit()

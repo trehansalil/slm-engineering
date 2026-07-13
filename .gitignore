@@ -1,4 +1,19 @@
+# Environment
 .env.local
+.venv/
+
+# Python
 __pycache__/
 *.pyc
-.venv/
+
+# Model artifacts (large binaries)
+local_model/
+
+# Training data
+data/
+
+# Redundant local copies
+tokenizer/
+
+# macOS
+.DS_Store
