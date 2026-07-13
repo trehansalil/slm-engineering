@@ -1,8 +1,24 @@
-# SLM-125M: Legal/Financial Small Language Model
+# SLM-125M
 
-A 125M-parameter decoder-only transformer trained from scratch on legal and financial text, then fine-tuned for grounded Q&A. The entire pipeline — data cleaning, pretraining, SFT, and on-device inference — runs reproducibly for under $15.
+**A 125M-parameter language model trained from scratch on legal and financial text — data cleaning through on-device inference — for under $15.**
 
-**HuggingFace:** [Saliltrehan7/slm-125m-base](https://huggingface.co/Saliltrehan7/slm-125m-base)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://python.org)
+[![HuggingFace](https://img.shields.io/badge/HuggingFace-slm--125m--base-FFD21E.svg)](https://huggingface.co/Saliltrehan7/slm-125m-base)
+[![Modal](https://img.shields.io/badge/Infra-Modal-00D26A.svg)](https://modal.com)
+
+---
+
+## Why This Exists
+
+Most LLM tutorials stop at fine-tuning someone else's model. This project builds one from raw data:
+
+- **From-scratch pretraining** on 2.04B tokens of curated legal/financial text (8x H100, 19 min)
+- **Supervised fine-tuning** with synthetically generated Q&A pairs, trainable on a Mac
+- **On-device inference** via CoreML with KV-cached decoding at 56 tok/s on Apple Silicon
+- **Fully reproducible** — every phase scripted, every cost tracked, total spend ~$15
+
+---
 
 ## Model
 
@@ -11,153 +27,286 @@ A 125M-parameter decoder-only transformer trained from scratch on legal and fina
 | Architecture | LLaMA (decoder-only transformer) |
 | Parameters | 125.8M (tied embeddings) |
 | Layers / Hidden / Heads | 12 / 768 / 12 (MHA, head dim 64) |
-| FFN (SwiGLU) | 3,072 |
+| FFN | SwiGLU, 3,072 intermediate |
 | Context length | 1,024 tokens |
-| Vocabulary | 16,384 (byte-level BPE) |
+| Vocabulary | 16,384 (byte-level BPE, custom-trained) |
+| Positional encoding | RoPE (theta = 10,000) |
 | Precision | bfloat16 |
+
+---
+
+## Pipeline
+
+The project is organized into 9 sequential phases. Each phase is a single `make` target.
+
+```
+                          ┌─────────────────────────────────────────────┐
+                          │            MODAL (SERVERLESS GPU)           │
+  ┌─────────┐  ┌─────────┤                                             │
+  │ HF      │  │ Phase 1 │  clean ──► dedup ──► tokenizer ──► tokenize │
+  │ Datasets ├──► Stream  │    │         │          │             │      │
+  └─────────┘  │ + Clean │    ▼         ▼          ▼             ▼      │
+               └─────────┤ Phase 2   Phase 3    Phase 4       Phase 5  │
+                          │                                  pretrain   │
+                          │                                  8x H100   │
+                          │                                     │       │
+                          │                                  Phase 6   │
+                          │                                  upload     │
+                          │                                  to HF     │
+                          └──────────────────────────────┬──────────────┘
+                                                         │
+                     ┌───────────────────────────────────┘
+                     │
+                     ▼
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │                     SFT DATA GENERATION                             │
+  │  Phase 7: Azure OpenAI + Gemini Flash ──► 6.7K Q&A pairs           │
+  │           (grounded_qa, extraction, summarization, refusal)         │
+  └───────────────────────────────┬──────────────────────────────────────┘
+                                  │
+                     ┌────────────┴────────────┐
+                     │                         │
+                     ▼                         ▼
+            ┌────────────────┐      ┌─────────────────┐
+            │ Phase 8: SFT   │      │ Phase 8: SFT    │
+            │ Modal (A100)   │      │ Local (MPS/CPU) │
+            └───────┬────────┘      └────────┬────────┘
+                    │                         │
+                    └────────────┬────────────┘
+                                 │
+                                 ▼
+            ┌────────────────────────────────────────┐
+            │ Phase 9: Inference                     │
+            │  ├── PyTorch (CPU / MPS)               │
+            │  └── CoreML (Apple Silicon, KV cached) │
+            └────────────────────────────────────────┘
+```
+
+---
 
 ## Training Data
 
-Legal-first mix (~40/40/20), 2.04B tokens after cleaning and deduplication:
+Legal-first mix (~40/40/20), **2.04B tokens** after cleaning and deduplication:
 
-| Source | Dataset | Domain |
-|--------|---------|--------|
-| US Case Law | [HFforLegal/case-law](https://huggingface.co/datasets/HFforLegal/case-law) | Legal |
-| SEC Filings | [PleIAs/SEC](https://huggingface.co/datasets/PleIAs/SEC) | Financial |
-| FineWeb-Edu | [HuggingFaceFW/fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | General |
+| Source | Dataset | Domain | Share |
+|--------|---------|--------|-------|
+| US Case Law | [HFforLegal/case-law](https://huggingface.co/datasets/HFforLegal/case-law) | Legal | ~40% |
+| SEC Filings | [PleIAs/SEC](https://huggingface.co/datasets/PleIAs/SEC) | Financial | ~40% |
+| FineWeb-Edu | [HuggingFaceFW/fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | General | ~20% |
 
-Processing pipeline: 6-step deterministic cleaning → exact + near deduplication (MinHash LSH) → contamination stripping (13-gram overlap with CaseHOLD/LexGLUE) → BPE tokenization → uint16 packed 1024-token windows.
+**Processing pipeline:**
+
+1. **Clean** — 6-step deterministic filter (line length, boilerplate, repetition, language, OCR quality, min length)
+2. **Dedup** — exact (blake2b) + near-duplicate removal (MinHash LSH, 128 perms, Jaccard > 0.7)
+3. **Decontaminate** — 13-gram overlap stripping against [CaseHOLD](https://huggingface.co/datasets/casehold/casehold) and [LexGLUE](https://huggingface.co/datasets/coastalcph/lex_glue) eval sets
+4. **Tokenize** — custom 16K BPE tokenizer, packed into uint16 1024-token windows
+
+---
 
 ## Results
 
-### Pretraining (base model)
+### Pretraining
 
-8x H100 on Modal, 1 epoch, 19 minutes, **$12.36 total**.
+8x H100 on Modal, single epoch over 2.04B tokens, **19 minutes**.
 
-| Step | Val Loss | Val Perplexity |
-|------|----------|----------------|
-| 1,000 | 2.81 | 16.54 |
-| 2,000 | 2.53 | 12.56 |
-| 3,500 | 2.41 | **11.08** |
+| Step | Train Loss | Val Loss | Val Perplexity |
+|------|-----------|----------|----------------|
+| 1,000 | 2.80 | 2.81 | 16.54 |
+| 2,000 | 2.55 | 2.53 | 12.56 |
+| 3,000 | 2.44 | 2.42 | 11.29 |
+| 3,500 | 2.38 | 2.41 | **11.08** |
 
-### SFT (instruction-tuned)
+### Supervised Fine-Tuning
 
-12K grounded Q&A pairs generated via Azure OpenAI + Gemini Flash, filtered through a 5-stage gauntlet (format, TF-IDF dedup, grounding check, task balance, target cap).
+6.7K grounded Q&A pairs (filtered from ~10.5K raw) generated via Azure OpenAI + Gemini Flash, passed through a 5-stage gauntlet (format validation, TF-IDF dedup, grounding check, task balance, target cap).
 
-| | Modal (A100) | Local (MPS) |
+| | Modal (A100) | Local (Mac MPS) |
 |---|---|---|
-| Epochs | 10 | 8 (best @ 4) |
+| Epochs | 10 | 8 (best @ epoch 4) |
 | Best Val Loss | 6.19 (ppl 485.69) | 4.36 (ppl 78.24) |
 
-### Inference (Apple Silicon)
+### On-Device Inference
 
-CoreML conversion with KV-cached single-token decode:
+CoreML conversion with KV-cached single-token decode on Apple Silicon:
 
-| | Speed |
-|---|---|
+| Phase | Throughput |
+|-------|-----------|
 | Prefill | 49 tok/s |
 | Decode | **56 tok/s** |
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.12+
+- [Modal](https://modal.com) account (for cloud phases only)
+- macOS with Apple Silicon (for CoreML inference; PyTorch works anywhere)
+
+### Install
+
+```bash
+git clone https://github.com/trehansalil/slm-engineering.git
+cd slm-engineering
+pip install torch transformers coremltools numpy
+```
+
+### Chat
+
+```bash
+# PyTorch — works on any platform (CPU/MPS)
+python inference/chat_pytorch.py --model local_model/sft_best
+
+# CoreML — Apple Silicon only, KV-cached, 56 tok/s
+python inference/convert_coreml.py   # one-time conversion
+python inference/chat_coreml.py
+```
+
+### Run the Full Pipeline
+
+```bash
+# Pretrain (Modal, ~$12)
+make clean-data                            # Phase 1: stream + clean
+make dedup                                 # Phase 2: dedup + decontaminate
+make tokenizer                             # Phase 3: train BPE tokenizer
+make tokenize                              # Phase 4: pack into 1024-token windows
+make pretrain                              # Phase 5: train on 8x H100
+make upload                                # Phase 6: push to HuggingFace
+
+# SFT data generation (Modal, requires API keys)
+make sft-data-azure                        # Generate Q&A via Azure OpenAI
+make sft-data-gemini                       # Generate Q&A via Gemini Flash
+make sft-tokenize                          # Tokenize SFT dataset
+
+# SFT fine-tuning
+make sft-local ARGS="--n-epochs 20"        # Train on Mac (MPS)
+make sft-modal ARGS="--n-epochs 10"        # Train on Modal A100
+
+# Inference
+make chat                                  # PyTorch chat
+make convert-coreml                        # Convert to CoreML
+make chat-coreml                           # CoreML chat (Apple Silicon)
+```
+
+All SFT and Modal targets accept additional arguments via `ARGS`:
+
+```bash
+make sft-local-fresh ARGS="--n-epochs 10 --lr 1e-5 --batch-size 8"
+```
+
+---
 
 ## Project Structure
 
 ```
-Makefile                     # All pipeline targets (make help)
-config.py                    # Central config — model arch, data mix, hyperparams
-
-pretrain/                    # Phases 1-6: raw data → base model
-  pipeline.py                #   Modal orchestrator (clean, dedup, tokenize, pretrain, upload)
-  cleaning.py                #   Deterministic 6-step cleaning pipeline
-  dedup.py                   #   Hashing and n-gram dedup helpers
-  train_ddp.py               #   Multi-GPU DDP training script
-
-sft/                         # Phases 7-8: SFT data generation + fine-tuning
-  datagen_azure.py           #   Generate Q&A pairs via Azure OpenAI
-  datagen_gemini.py          #   Generate Q&A pairs via Gemini Flash
-  finetune_modal.py          #   Full fine-tuning on Modal A100
-  finetune_local.py          #   Full fine-tuning on Mac MPS/CPU
-
-inference/                   # Phase 9: serving
-  convert_coreml.py          #   Convert to CoreML with KV cache
-  chat_pytorch.py            #   PyTorch inference (CPU/MPS)
-  chat_coreml.py             #   CoreML inference on Apple Silicon (ANE)
-
-docs/
-  MODEL_CARD.md              # HuggingFace model card
-  PROJECT_SUMMARY.md         # End-to-end project writeup
-  REPLICATION_GUIDE.md       # Step-by-step reproduction instructions
-notes/                       # Voice-memo transcripts and project setup notes
+slm-engineering/
+├── Makefile                        Pipeline orchestration (make help for all targets)
+├── config.py                       Central config — model arch, data sources, hyperparams
+│
+├── pretrain/                       Phases 1–6: raw data → base model
+│   ├── pipeline.py                   Modal orchestrator (clean, dedup, tokenize, pretrain, upload)
+│   ├── cleaning.py                   6-step deterministic cleaning pipeline
+│   ├── dedup.py                      Hashing, MinHash LSH, n-gram decontamination
+│   └── train_ddp.py                  Multi-GPU DDP training via torchrun
+│
+├── sft/                            Phases 7–8: SFT data generation + fine-tuning
+│   ├── datagen_azure.py              Generate Q&A pairs via Azure OpenAI
+│   ├── datagen_gemini.py             Generate Q&A pairs via Gemini Flash
+│   ├── finetune_modal.py             Fine-tuning on Modal A100
+│   └── finetune_local.py             Fine-tuning on Mac MPS / CPU
+│
+├── inference/                      Phase 9: serving
+│   ├── convert_coreml.py             PyTorch → CoreML with KV cache
+│   ├── chat_pytorch.py               PyTorch inference (CPU / MPS)
+│   └── chat_coreml.py                CoreML inference on Apple Silicon (ANE)
+│
+├── docs/
+│   ├── MODEL_CARD.md                 HuggingFace model card
+│   ├── PROJECT_SUMMARY.md            End-to-end architecture and results writeup
+│   └── REPLICATION_GUIDE.md          Step-by-step reproduction instructions
+│
+├── data/                           SFT Q&A pairs (JSONL)
+├── local_model/                    Local checkpoints, CoreML models, tokenized data
+├── tokenizer/                      Trained BPE tokenizer (16K vocab)
+└── notes/                          Voice-memo transcripts and project setup notes
 ```
 
-## Environment Variables
+---
 
-SFT data generation requires API keys set as [Modal secrets](https://modal.com/docs/guide/secrets):
+## Configuration
 
-| Variable | Used by | Purpose |
-|----------|---------|---------|
-| `AZURE_API_KEY` | `datagen_azure.py` | Azure OpenAI endpoint |
+### CLI Arguments
+
+**Local SFT** (`sft/finetune_local.py`):
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--model` | `local_model/sft_best` | Base model directory |
+| `--resume` | _(auto)_ | Resume from a specific checkpoint |
+| `--fresh` | `false` | Ignore existing checkpoints, train from base |
+| `--n-epochs` | `20` | Number of training epochs |
+| `--batch-size` | `16` | Micro batch size |
+| `--grad-accum` | `2` | Gradient accumulation steps |
+| `--lr` | `2e-5` | Peak learning rate |
+| `--min-lr` | `2e-6` | Minimum LR (cosine decay floor) |
+| `--weight-decay` | `0.01` | AdamW weight decay |
+| `--grad-clip` | `1.0` | Max gradient norm |
+| `--device` | _(auto)_ | Force `cpu`, `mps`, or `cuda` |
+| `--log-every` | `20` | Steps between log lines |
+| `--ckpt-every-epochs` | `2` | Checkpoint save frequency |
+
+**PyTorch Chat** (`inference/chat_pytorch.py`):
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--model` | `local_model/sft_best` | Model directory |
+| `--prompt` | _(interactive)_ | Single prompt (non-interactive mode) |
+| `--system` | _(default)_ | System prompt |
+| `--max-tokens` | `256` | Max tokens to generate |
+| `--temperature` | `0.7` | Sampling temperature |
+
+### Environment Variables
+
+SFT data generation requires API keys configured as [Modal secrets](https://modal.com/docs/guide/secrets):
+
+| Variable | Script | Purpose |
+|----------|--------|---------|
+| `AZURE_API_KEY` | `datagen_azure.py` | Azure OpenAI endpoint key |
 | `AZURE_BASE_URL` | `datagen_azure.py` | Azure OpenAI base URL |
-| `AZURE_API_VERSION` | `datagen_azure.py` | Azure API version |
-| `AZURE_MODEL` | `datagen_azure.py` | Deployment name |
+| `AZURE_API_VERSION` | `datagen_azure.py` | Azure API version string |
+| `AZURE_MODEL` | `datagen_azure.py` | Azure deployment name |
 | `GEMINI_API_KEY` | `datagen_gemini.py` | Google Gemini API key |
 
-DDP training uses `LOCAL_RANK` (set automatically by `torchrun`). Local SFT accepts `NUM_EPOCHS` to override the default epoch count.
+`LOCAL_RANK` is set automatically by `torchrun` during DDP pretraining.
 
-## Quick Start
+---
 
-```bash
-# Install dependencies
-pip install torch transformers coremltools numpy
+## Infrastructure and Costs
 
-# Chat with PyTorch (downloads model from local_model/sft_local)
-python inference/chat_pytorch.py
+All cloud compute runs on [Modal](https://modal.com)'s serverless platform — no persistent infrastructure, no idle costs. Local training and inference run on Apple Silicon (MPS / ANE).
 
-# Convert to CoreML and chat on Apple Silicon
-python inference/convert_coreml.py
-python inference/chat_coreml.py
-```
+| Phase | Resource | Wall Time | Cost |
+|-------|----------|-----------|------|
+| Data pipeline (clean, dedup, tokenize) | CPU, 14 shards | ~17 min | $1.57 |
+| Pretraining | 8x H100 (DDP) | 19 min | $10.59 |
+| Eval + HuggingFace upload | L4 | ~1 min | $0.20 |
+| SFT data generation | CPU (Modal) | ~2–3 hrs | ~$2.00 |
+| SFT fine-tuning | A100 or local MPS | ~2–4 hrs | ~$0.50 |
+| **Total** | | | **~$15** |
 
-## Pipeline Commands
+---
 
-Run `make help` to see all targets:
+## Documentation
 
-```
-Pretrain pipeline (Modal)
-  make smoke               Smoke test data pipeline
-  make clean-data          Stream + clean all sources
-  make dedup               Dedup + contamination strip
-  make tokenizer           Train 16K BPE tokenizer
-  make tokenize            Tokenize into 1024-token windows
-  make pretrain            Pretrain on 8x H100
-  make upload              Upload base model to HuggingFace
-  make eval                Final perplexity eval
+| Document | Description |
+|----------|-------------|
+| [Model Card](docs/MODEL_CARD.md) | HuggingFace model card — architecture, intended use, limitations, license |
+| [Project Summary](docs/PROJECT_SUMMARY.md) | End-to-end technical writeup — data pipeline, training, results, cost breakdown |
+| [Replication Guide](docs/REPLICATION_GUIDE.md) | Step-by-step reproduction with expected outputs at each phase |
 
-SFT data generation (Modal)
-  make sft-data-azure      Generate Q&A pairs via Azure OpenAI
-  make sft-data-gemini     Generate Q&A pairs via Gemini Flash
-
-SFT fine-tuning
-  make sft-modal           Fine-tune on Modal A100
-  make sft-local           Fine-tune on local Mac (MPS)
-
-Inference
-  make chat                PyTorch chat
-  make chat-coreml         CoreML chat (KV cached, Apple Silicon)
-  make convert-coreml      Convert model to CoreML
-```
-
-## Infrastructure
-
-All cloud compute runs on [Modal](https://modal.com)'s serverless platform. Local training and inference run on Apple Silicon (MPS / ANE).
-
-| Phase | Resource | Cost |
-|-------|----------|------|
-| Data pipeline | CPU (Modal) | $1.57 |
-| Pretraining | 8x H100, 19 min | $10.59 |
-| Eval + upload | L4 | $0.20 |
-| SFT data gen | CPU (Modal) | ~$2.00 |
-| SFT training | A100 / local MPS | ~$0.50 |
-| **Total** | | **~$15** |
+---
 
 ## License
 
-Apache 2.0
+[Apache 2.0](https://opensource.org/licenses/Apache-2.0)
