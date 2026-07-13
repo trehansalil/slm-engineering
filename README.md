@@ -39,47 +39,38 @@ Most LLM tutorials stop at fine-tuning someone else's model. This project builds
 
 The project is organized into 9 sequential phases. Each phase is a single `make` target.
 
-```
-                          ┌─────────────────────────────────────────────┐
-                          │            MODAL (SERVERLESS GPU)           │
-  ┌─────────┐  ┌─────────┤                                             │
-  │ HF      │  │ Phase 1 │  clean ──► dedup ──► tokenizer ──► tokenize │
-  │ Datasets ├──► Stream  │    │         │          │             │      │
-  └─────────┘  │ + Clean │    ▼         ▼          ▼             ▼      │
-               └─────────┤ Phase 2   Phase 3    Phase 4       Phase 5  │
-                          │                                  pretrain   │
-                          │                                  8x H100   │
-                          │                                     │       │
-                          │                                  Phase 6   │
-                          │                                  upload     │
-                          │                                  to HF     │
-                          └──────────────────────────────┬──────────────┘
-                                                         │
-                     ┌───────────────────────────────────┘
-                     │
-                     ▼
-  ┌──────────────────────────────────────────────────────────────────────┐
-  │                     SFT DATA GENERATION                             │
-  │  Phase 7: Azure OpenAI + Gemini Flash ──► 6.7K Q&A pairs           │
-  │           (grounded_qa, extraction, summarization, refusal)         │
-  └───────────────────────────────┬──────────────────────────────────────┘
-                                  │
-                     ┌────────────┴────────────┐
-                     │                         │
-                     ▼                         ▼
-            ┌────────────────┐      ┌─────────────────┐
-            │ Phase 8: SFT   │      │ Phase 8: SFT    │
-            │ Modal (A100)   │      │ Local (MPS/CPU) │
-            └───────┬────────┘      └────────┬────────┘
-                    │                         │
-                    └────────────┬────────────┘
-                                 │
-                                 ▼
-            ┌────────────────────────────────────────┐
-            │ Phase 9: Inference                     │
-            │  ├── PyTorch (CPU / MPS)               │
-            │  └── CoreML (Apple Silicon, KV cached) │
-            └────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph "<b>Modal — Serverless GPU</b>"
+        A["HF Datasets<br/><i>case-law · SEC · fineweb-edu</i>"] --> B["<b>Phase 1</b><br/>Stream + Clean<br/><code>make clean-data</code>"]
+        B --> C["<b>Phase 2</b><br/>Dedup + Decontaminate<br/><code>make dedup</code>"]
+        C --> D["<b>Phase 3</b><br/>Train 16K BPE<br/><code>make tokenizer</code>"]
+        D --> E["<b>Phase 4</b><br/>Tokenize → 1024-token windows<br/><code>make tokenize</code>"]
+        E --> F["<b>Phase 5</b><br/>Pretrain · 8× H100 · 19 min<br/><code>make pretrain</code>"]
+        F --> G["<b>Phase 6</b><br/>Upload to HuggingFace<br/><code>make upload</code>"]
+    end
+
+    subgraph "<b>SFT Data Generation</b>"
+        G --> H["<b>Phase 7</b><br/>Azure OpenAI + Gemini Flash<br/>6.7K Q&A pairs"]
+    end
+
+    subgraph "<b>SFT Fine-Tuning</b>"
+        H --> I["<b>Phase 8a</b><br/>Modal A100<br/><code>make sft-modal</code>"]
+        H --> J["<b>Phase 8b</b><br/>Local Mac MPS / CPU<br/><code>make sft-local</code>"]
+    end
+
+    subgraph "<b>Inference</b>"
+        I --> K["<b>Phase 9</b><br/>PyTorch · CPU / MPS<br/><code>make chat</code>"]
+        J --> K
+        I --> L["<b>Phase 9</b><br/>CoreML · Apple Silicon · KV cached<br/><code>make chat-coreml</code>"]
+        J --> L
+    end
+
+    style A fill:#f0f4ff,stroke:#4a6fa5
+    style F fill:#fff3e0,stroke:#e65100
+    style H fill:#e8f5e9,stroke:#2e7d32
+    style K fill:#fce4ec,stroke:#c62828
+    style L fill:#fce4ec,stroke:#c62828
 ```
 
 ---
