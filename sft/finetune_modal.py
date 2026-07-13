@@ -3,10 +3,14 @@
 Tokenizes chat JSONL, masks loss on system/user turns, fine-tunes from
 the pre-trained base checkpoint with LoRA-free full fine-tuning.
 
+Logs train_loss, val_loss, and perplexity per epoch. Checkpoints every
+2 epochs by default.
+
 Usage:
     modal run sft/finetune_modal.py::tokenize_sft
     modal run sft/finetune_modal.py::finetune
-    modal run sft/finetune_modal.py::finetune --n-epochs 5
+    modal run sft/finetune_modal.py::finetune --n-epochs 20
+    modal run sft/finetune_modal.py::finetune --n-epochs 20 --fresh
 """
 
 from __future__ import annotations
@@ -160,10 +164,18 @@ def tokenize_sft():
     image=sft_image,
     volumes=VOLUMES,
     gpu="A100",
-    timeout=3600 * 2,
+    timeout=3600 * 4,
 )
-def run_sft(n_epochs: int = 3) -> dict:
-    """Fine-tune the pre-trained base model on the SFT dataset."""
+def run_sft(
+    n_epochs: int = 20,
+    ckpt_every_epochs: int = 2,
+    fresh: bool = False,
+) -> dict:
+    """Fine-tune the pre-trained base model on the SFT dataset.
+
+    Logs train_loss, val_loss, perplexity per epoch. Checkpoints model,
+    optimizer, and training state every ``ckpt_every_epochs`` epochs.
+    """
     import json
     import math
     import os
@@ -172,11 +184,11 @@ def run_sft(n_epochs: int = 3) -> dict:
     import numpy as np
     import torch
     from torch.utils.data import DataLoader, Dataset, random_split
-    from transformers import LlamaConfig, LlamaForCausalLM
+    from transformers import LlamaForCausalLM
 
     device = torch.device("cuda")
 
-    # Load tokenized SFT data
+    # ── data ──────────────────────────────────────────────────────────
     input_ids = np.load(f"{SFT_TOKENS_DIR}/input_ids.npy")
     labels = np.load(f"{SFT_TOKENS_DIR}/labels.npy")
     print(f"Loaded {len(input_ids)} tokenized examples")
@@ -204,7 +216,7 @@ def run_sft(n_epochs: int = 3) -> dict:
     )
     print(f"Train: {train_size}, Val: {val_size}")
 
-    # SFT hyperparams
+    # ── hyperparams ───────────────────────────────────────────────────
     lr = 2e-5
     min_lr = 2e-6
     batch_size = 16
@@ -212,44 +224,54 @@ def run_sft(n_epochs: int = 3) -> dict:
     weight_decay = 0.01
     grad_clip = 1.0
     log_every = 20
-    eval_every = 200
-    ckpt_every = 500
 
-    # Model — resume from SFT checkpoint if available, otherwise from base
+    # ── model: resume or fresh from base ──────────────────────────────
     from huggingface_hub import snapshot_download
 
-    sft_ckpt_path = f"{SFT_CKPT_DIR}/sft_ckpt.pt"
-    start_step = 0
-    prior_epochs = 0
+    if not os.path.exists(f"{BASE_CKPT_DIR}/config.json"):
+        print(f"Downloading base model from {HF_BASE_REPO}...")
+        snapshot_download(
+            repo_id=HF_BASE_REPO,
+            local_dir=BASE_CKPT_DIR,
+            ignore_patterns=["*.md", ".gitattributes"],
+        )
+        volume.commit()
+        print("Base model downloaded and cached on volume")
 
-    if os.path.exists(sft_ckpt_path):
-        print("Resuming from SFT checkpoint...")
-        model = LlamaForCausalLM.from_pretrained(BASE_CKPT_DIR, torch_dtype=torch.bfloat16)
-        model = model.to(device=device)
-        ckpt = torch.load(sft_ckpt_path, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model"])
-        start_step = ckpt["step"]
-        steps_per_epoch = len(DataLoader(train_ds, batch_size=batch_size, drop_last=True)) // grad_accum
-        prior_epochs = start_step // max(1, steps_per_epoch)
-        print(f"Resumed from step {start_step} (~{prior_epochs} prior epochs)")
-    else:
-        if not os.path.exists(f"{BASE_CKPT_DIR}/config.json"):
-            print(f"Downloading base model from {HF_BASE_REPO}...")
-            snapshot_download(
-                repo_id=HF_BASE_REPO,
-                local_dir=BASE_CKPT_DIR,
-                ignore_patterns=["*.md", ".gitattributes"],
+    start_epoch = 0
+    resume_ckpt = None
+
+    if not fresh:
+        ckpt_dirs = []
+        if os.path.exists(SFT_CKPT_DIR):
+            ckpt_dirs = sorted(
+                [d for d in os.listdir(SFT_CKPT_DIR) if d.startswith("epoch_")],
+                key=lambda x: int(x.split("_")[1]),
             )
-            volume.commit()
-            print("Base model downloaded and cached on volume")
+        if ckpt_dirs:
+            latest = ckpt_dirs[-1]
+            resume_path = f"{SFT_CKPT_DIR}/{latest}"
+            state_path = f"{resume_path}/training_state.pt"
+            if os.path.exists(state_path):
+                resume_ckpt = torch.load(state_path, map_location="cpu", weights_only=False)
+                start_epoch = resume_ckpt["epoch"]
+                print(f"Resuming from {resume_path} (after epoch {start_epoch}, "
+                      f"val_loss={resume_ckpt.get('val_loss', '?')}, "
+                      f"ppl={resume_ckpt.get('ppl', '?')})")
 
+    if resume_ckpt is not None:
+        model = LlamaForCausalLM.from_pretrained(
+            f"{SFT_CKPT_DIR}/epoch_{start_epoch:02d}", torch_dtype=torch.bfloat16,
+        )
+    else:
         model = LlamaForCausalLM.from_pretrained(BASE_CKPT_DIR, torch_dtype=torch.bfloat16)
-        print(f"Loaded pre-trained model from {HF_BASE_REPO}")
-        model = model.to(device=device)
+        print(f"Loaded fresh base model from {HF_BASE_REPO}")
 
+    model = model.to(device=device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {n_params:,} params ({n_params/1e6:.1f}M)")
 
+    # ── dataloaders ───────────────────────────────────────────────────
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                           num_workers=2, pin_memory=True, drop_last=True)
     val_dl = DataLoader(val_ds, batch_size=batch_size * 2, shuffle=False,
@@ -258,12 +280,17 @@ def run_sft(n_epochs: int = 3) -> dict:
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=weight_decay,
     )
-    if start_step > 0 and "optimizer" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer"])
+    if resume_ckpt is not None and "optimizer" in resume_ckpt:
+        optimizer.load_state_dict(resume_ckpt["optimizer"])
         print("Restored optimizer state")
 
+    remaining_epochs = n_epochs - start_epoch
+    if remaining_epochs <= 0:
+        print(f"Already trained {start_epoch} epochs (target {n_epochs}). Nothing to do.")
+        return {"status": "already_done", "epochs_completed": start_epoch}
+
     steps_per_epoch = len(train_dl) // grad_accum
-    total_steps = start_step + steps_per_epoch * n_epochs
+    total_steps = steps_per_epoch * remaining_epochs
     warmup_steps = min(100, total_steps // 10)
 
     def get_lr(step):
@@ -272,11 +299,18 @@ def run_sft(n_epochs: int = 3) -> dict:
         ratio = (step - warmup_steps) / max(1, total_steps - warmup_steps)
         return min_lr + 0.5 * (lr - min_lr) * (1.0 + math.cos(math.pi * ratio))
 
-    print(f"SFT config: {n_epochs} epochs (+ {prior_epochs} prior), {total_steps} steps, "
-          f"batch={batch_size}x{grad_accum}, lr={lr}, warmup={warmup_steps}")
+    print(f"\nSFT config: epochs {start_epoch + 1} -> {n_epochs}, "
+          f"{steps_per_epoch} steps/epoch, {total_steps} total steps")
+    print(f"batch={batch_size}x{grad_accum}, lr={lr}, warmup={warmup_steps}")
+    print(f"Checkpoint every {ckpt_every_epochs} epochs\n")
 
+    # ── metrics files ─────────────────────────────────────────────────
     os.makedirs(SFT_CKPT_DIR, exist_ok=True)
-    mf = open(SFT_METRICS_PATH, "a")
+    epoch_log_path = f"{SFT_CKPT_DIR}/epoch_metrics.jsonl"
+    step_log_path = SFT_METRICS_PATH
+
+    step_log = open(step_log_path, "a")
+    epoch_log = open(epoch_log_path, "a")
 
     def evaluate():
         model.eval()
@@ -291,20 +325,53 @@ def run_sft(n_epochs: int = 3) -> dict:
         model.train()
         return total_loss / total_count
 
-    step = start_step
+    def save_checkpoint(epoch, step, val_loss, ppl):
+        ckpt_path = f"{SFT_CKPT_DIR}/epoch_{epoch:02d}"
+        os.makedirs(ckpt_path, exist_ok=True)
+        model.save_pretrained(ckpt_path)
+        torch.save({
+            "optimizer": optimizer.state_dict(),
+            "epoch": epoch,
+            "step": step,
+            "val_loss": val_loss,
+            "ppl": ppl,
+        }, f"{ckpt_path}/training_state.pt")
+        volume.commit()
+        print(f"  [ckpt] saved epoch {epoch} -> {ckpt_path}")
+
+    # ── initial eval ──────────────────────────────────────────────────
+    init_vl = evaluate()
+    init_ppl = math.exp(min(init_vl, 20))
+    print(f"Initial val_loss={init_vl:.4f}  ppl={init_ppl:.2f}")
+    epoch_log.write(json.dumps({
+        "epoch": start_epoch, "train_loss": None,
+        "val_loss": round(init_vl, 4), "ppl": round(init_ppl, 2),
+        "phase": "start",
+    }) + "\n")
+    epoch_log.flush()
+
+    # ── training loop ─────────────────────────────────────────────────
+    step = 0
     micro = 0
-    running_loss = 0.0
+    best_val_loss = init_vl
+    avg_train_loss = vl = init_vl
+    ppl = init_ppl
     t0 = t_global = time.time()
-    best_val_loss = float("inf")
+    running_loss_step = 0.0
 
     model.train()
-    for epoch in range(n_epochs):
+    for epoch_idx in range(remaining_epochs):
+        current_epoch = start_epoch + epoch_idx + 1
+        epoch_train_loss = 0.0
+        epoch_train_steps = 0
+
         for ids, labs in train_dl:
             ids, labs = ids.to(device), labs.to(device)
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 loss = model(input_ids=ids, labels=labs).loss / grad_accum
             loss.backward()
-            running_loss += loss.item()
+            running_loss_step += loss.item()
+            epoch_train_loss += loss.item()
             micro += 1
 
             if micro % grad_accum != 0:
@@ -317,67 +384,92 @@ def run_sft(n_epochs: int = 3) -> dict:
             optimizer.step()
             optimizer.zero_grad()
             step += 1
+            epoch_train_steps += 1
 
             if step % log_every == 0:
-                dt = time.time() - t0
-                avg = running_loss / log_every
+                avg = running_loss_step / log_every
                 elapsed = time.time() - t_global
-                print(f"step {step:>5}/{total_steps} | loss {avg:.4f} | lr {current_lr:.2e} | "
-                      f"{elapsed/60:.1f}min")
-                mf.write(json.dumps({"step": step, "loss": round(avg, 4),
-                                     "lr": current_lr, "elapsed_s": round(elapsed)}) + "\n")
-                mf.flush()
-                running_loss = 0.0
+                print(f"  step {step:>5}/{total_steps} | loss {avg:.4f} | "
+                      f"lr {current_lr:.2e} | {elapsed/60:.1f}min")
+                step_log.write(json.dumps({
+                    "epoch": current_epoch, "step": step,
+                    "loss": round(avg, 4), "lr": current_lr,
+                    "elapsed_s": round(elapsed),
+                }) + "\n")
+                step_log.flush()
+                running_loss_step = 0.0
                 t0 = time.time()
 
-            if step % eval_every == 0:
-                vl = evaluate()
-                ppl = math.exp(min(vl, 20))
-                print(f"  [eval] val_loss={vl:.4f} ppl={ppl:.2f}")
-                mf.write(json.dumps({"step": step, "val_loss": round(vl, 4),
-                                     "ppl": round(ppl, 2)}) + "\n")
-                mf.flush()
-                if vl < best_val_loss:
-                    best_val_loss = vl
-                    model.save_pretrained(f"{SFT_CKPT_DIR}/best")
-                    print(f"  [best] saved (val_loss={vl:.4f})")
-                    volume.commit()
+        # ── end-of-epoch eval ─────────────────────────────────────────
+        avg_train_loss = epoch_train_loss / max(1, epoch_train_steps)
+        vl = evaluate()
+        ppl = math.exp(min(vl, 20))
+        elapsed = time.time() - t_global
+        improving = "+" if vl < best_val_loss else "-"
 
-            if step % ckpt_every == 0:
-                torch.save({"step": step, "model": model.state_dict(),
-                            "optimizer": optimizer.state_dict()},
-                           f"{SFT_CKPT_DIR}/sft_ckpt.pt")
-                volume.commit()
-                print(f"  [ckpt] step {step}")
+        print(f"[epoch {current_epoch:>2}/{n_epochs}] "
+              f"train_loss={avg_train_loss:.4f}  val_loss={vl:.4f}  "
+              f"ppl={ppl:.2f} {improving}  | {elapsed/60:.1f}min")
 
-        print(f"  [epoch {epoch+1}/{n_epochs} done]")
+        epoch_log.write(json.dumps({
+            "epoch": current_epoch,
+            "train_loss": round(avg_train_loss, 4),
+            "val_loss": round(vl, 4),
+            "ppl": round(ppl, 2),
+            "improving": vl < best_val_loss,
+            "elapsed_min": round(elapsed / 60, 1),
+        }) + "\n")
+        epoch_log.flush()
 
-    # Final save
-    model.save_pretrained(f"{SFT_CKPT_DIR}/final")
-    torch.save({"step": step, "model": model.state_dict(),
-                "optimizer": optimizer.state_dict()},
-               f"{SFT_CKPT_DIR}/sft_ckpt.pt")
+        if vl < best_val_loss:
+            best_val_loss = vl
+            best_path = f"{SFT_CKPT_DIR}/best"
+            os.makedirs(best_path, exist_ok=True)
+            model.save_pretrained(best_path)
+            volume.commit()
+            print(f"  [best] saved (val_loss={vl:.4f})")
 
-    final_vl = evaluate()
-    final_ppl = math.exp(min(final_vl, 20))
-    elapsed = time.time() - t_global
-    mf.close()
+        if current_epoch % ckpt_every_epochs == 0:
+            save_checkpoint(current_epoch, step, vl, ppl)
+
+    # ── final save ────────────────────────────────────────────────────
+    final_path = f"{SFT_CKPT_DIR}/final"
+    os.makedirs(final_path, exist_ok=True)
+    model.save_pretrained(final_path)
+    save_checkpoint(n_epochs, step, vl, ppl)
+
+    step_log.close()
+    epoch_log.close()
     volume.commit()
 
+    elapsed = time.time() - t_global
+    best_ppl = math.exp(min(best_val_loss, 20))
     result = {
+        "epochs": n_epochs,
         "total_steps": step,
-        "final_val_loss": round(final_vl, 4),
-        "final_ppl": round(final_ppl, 2),
+        "final_train_loss": round(avg_train_loss, 4),
+        "final_val_loss": round(vl, 4),
+        "final_ppl": round(ppl, 2),
         "best_val_loss": round(best_val_loss, 4),
+        "best_ppl": round(best_ppl, 2),
         "elapsed_min": round(elapsed / 60, 1),
+        "epoch_log": epoch_log_path,
     }
-    print(f"SFT complete: {result}")
+    print(f"\nSFT complete: {json.dumps(result, indent=2)}")
     return result
 
 
 @app.local_entrypoint()
-def finetune(n_epochs: int = 3):
-    """Run SFT fine-tuning."""
-    print("Starting SFT fine-tuning...")
-    result = run_sft.remote(n_epochs)
-    print(f"Done: {result}")
+def finetune(n_epochs: int = 20, ckpt_every_epochs: int = 2, fresh: bool = False):
+    """Run SFT fine-tuning.
+
+    Args:
+        n_epochs: Total epochs to train (default 20).
+        ckpt_every_epochs: Save checkpoint every N epochs (default 2).
+        fresh: Ignore existing SFT checkpoints and start from base model.
+    """
+    print(f"Starting SFT: {n_epochs} epochs, ckpt every {ckpt_every_epochs}, "
+          f"fresh={fresh}")
+    result = run_sft.remote(n_epochs, ckpt_every_epochs, fresh)
+    import json as json_mod
+    print(f"\nDone: {json_mod.dumps(result, indent=2)}")

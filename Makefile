@@ -45,11 +45,17 @@ sft-data-gemini: ## Generate SFT pairs via Gemini Flash
 sft-tokenize: ## Tokenize SFT dataset on Modal
 	modal run sft/finetune_modal.py::tokenize_sft
 
-sft-modal: ## SFT on Modal A100
-	modal run sft/finetune_modal.py::finetune
+sft-modal: ## SFT on Modal A100 (20 epochs, ckpt every 2)
+	modal run sft/finetune_modal.py::finetune $(ARGS)
+
+sft-modal-fresh: ## SFT from scratch (ignore existing checkpoints)
+	modal run sft/finetune_modal.py::finetune --fresh $(ARGS)
 
 sft-local: ## SFT on local Mac (MPS)
-	python sft/finetune_local.py
+	python sft/finetune_local.py $(ARGS)
+
+sft-local-fresh: ## SFT on local Mac (MPS)
+	python sft/finetune_local.py --fresh $(ARGS)
 
 # ── Inference ─────────────────────────────────────────────────────
 

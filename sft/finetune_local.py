@@ -155,7 +155,9 @@ def main():
     parser.add_argument("--model", default=MODEL_DIR, help="Base model directory")
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume from specific checkpoint dir")
-    parser.add_argument("--n-epochs", type=int, default=3)
+    parser.add_argument("--fresh", action="store_true",
+                        help="Ignore existing checkpoints, start from base model")
+    parser.add_argument("--n-epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--grad-accum", type=int, default=2)
     parser.add_argument("--lr", type=float, default=2e-5)
@@ -193,7 +195,7 @@ def main():
     start_epoch = 0
     resume_path = args.resume
 
-    if resume_path is None:
+    if resume_path is None and not args.fresh:
         latest_ckpt, latest_epoch = find_latest_checkpoint()
         if latest_ckpt:
             resume_path = latest_ckpt
@@ -278,12 +280,15 @@ def main():
 
     for epoch_idx in range(args.n_epochs):
         current_epoch = start_epoch + epoch_idx + 1
+        epoch_train_loss = 0.0
+        epoch_train_steps = 0
 
         for ids, labs in train_dl:
             ids, labs = ids.to(device), labs.to(device)
             loss = model(input_ids=ids, labels=labs).loss / args.grad_accum
             loss.backward()
             running_loss += loss.item()
+            epoch_train_loss += loss.item()
             micro += 1
 
             if micro % args.grad_accum != 0:
@@ -296,30 +301,39 @@ def main():
             optimizer.step()
             optimizer.zero_grad()
             step += 1
+            epoch_train_steps += 1
 
             if step % args.log_every == 0:
                 avg = running_loss / args.log_every
+                vl_step = evaluate(model, val_dl, device)
                 elapsed = time.time() - t_global
                 sec_per_step = (time.time() - t0) / args.log_every
-                print(f"step {step:>5}/{total_steps} | loss {avg:.4f} | "
+                print(f"step {step:>5}/{total_steps} | train_loss {avg:.4f} | "
+                      f"val_loss {vl_step:.4f} | "
                       f"lr {current_lr:.2e} | {sec_per_step:.2f}s/step | "
                       f"{elapsed/60:.1f}min")
                 mf.write(json.dumps({"epoch": current_epoch, "step": step,
-                                     "loss": round(avg, 4), "lr": current_lr}) + "\n")
+                                     "train_loss": round(avg, 4),
+                                     "val_loss": round(vl_step, 4),
+                                     "lr": current_lr}) + "\n")
                 mf.flush()
                 running_loss = 0.0
                 t0 = time.time()
 
         # End of epoch — always evaluate
+        avg_train_loss = epoch_train_loss / max(1, epoch_train_steps)
         vl = evaluate(model, val_dl, device)
         ppl = math.exp(min(vl, 20))
         elapsed = time.time() - t_global
         improving = "✓" if vl < best_val_loss else "✗"
-        print(f"  [epoch {current_epoch}] val_loss={vl:.4f} ppl={ppl:.2f} "
+        print(f"  [epoch {current_epoch}] train_loss={avg_train_loss:.4f} "
+              f"val_loss={vl:.4f} ppl={ppl:.2f} "
               f"{improving} | {elapsed/60:.1f}min")
 
         ppl_log.write(json.dumps({
-            "epoch": current_epoch, "val_loss": round(vl, 4),
+            "epoch": current_epoch,
+            "train_loss": round(avg_train_loss, 4),
+            "val_loss": round(vl, 4),
             "ppl": round(ppl, 2), "improving": vl < best_val_loss,
         }) + "\n")
         ppl_log.flush()
@@ -334,7 +348,8 @@ def main():
                 dst = f"{OUTPUT_DIR}/{tf}"
                 if os.path.exists(src):
                     shutil.copy2(src, dst)
-            print(f"  [best] saved to {OUTPUT_DIR}")
+            save_checkpoint(model, optimizer, current_epoch, step, vl, ppl, args.model)
+            print(f"  [best] saved to {OUTPUT_DIR} + checkpoint")
 
         # Checkpoint every N epochs
         if current_epoch % args.ckpt_every_epochs == 0:
