@@ -60,7 +60,7 @@ sft-local-fresh: ## SFT from scratch on local Mac (ignore existing checkpoints)
 
 # ── Inference ─────────────────────────────────────────────────────
 
-chat: ## Chat via PyTorch (CPU/MPS)
+chat: ## Chat via PyTorch (MPS/CUDA/CPU)
 	python inference/chat_pytorch.py
 
 chat-coreml: ## Chat via CoreML (Apple Silicon, KV cached)
