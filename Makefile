@@ -103,8 +103,8 @@ sft-modal-fresh: ## SFT from scratch (ignore existing checkpoints)
 
 # Usage: make download-sft
 # Args: none
-download-sft: ## Download best SFT model from Modal volume
-	modal run remote_model/download.py
+download-sft: ## Download best SFT model + tokenizer from Modal volume
+	modal run remote_sft/download.py
 
 # Usage: make sft-local [ARGS="--model <path> --resume <path> --n-epochs <int> ..."]
 # Args:
@@ -145,7 +145,7 @@ chat: ## Chat via PyTorch (MPS/CUDA/CPU)
 # Usage: make chat-remote [ARGS="--prompt <str> --max-tokens <int> ..."]
 # Args: same as chat (--model and --tokenizer are pre-set)
 chat-remote: ## Chat via PyTorch using remote (Modal) SFT model
-	python inference/chat_pytorch.py --model remote_model/ --tokenizer local_model/sft_best/ $(ARGS)
+	python inference/chat_pytorch.py --model remote_sft/ --tokenizer remote_sft/ $(ARGS)
 
 # Usage: make chat-coreml [ARGS="--prompt <str> --model-dir <path> --max-tokens <int> ..."]
 # Args:

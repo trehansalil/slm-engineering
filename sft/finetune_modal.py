@@ -92,7 +92,19 @@ def tokenize_sft_data() -> dict:
     import numpy as np
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(config.TOKENIZER_DIR)
+    from huggingface_hub import snapshot_download
+
+    base_tok_dir = f"{config.BASE_CKPT_DIR}"
+    if not os.path.exists(f"{base_tok_dir}/tokenizer.json"):
+        print(f"Downloading base model tokenizer from {config.HF_REPO}...")
+        snapshot_download(
+            repo_id=config.HF_REPO,
+            local_dir=base_tok_dir,
+            ignore_patterns=["*.md", ".gitattributes", "model.safetensors"],
+        )
+        volume.commit()
+
+    tokenizer = AutoTokenizer.from_pretrained(base_tok_dir)
     pad_id = tokenizer.convert_tokens_to_ids(config.SPECIAL_TOKENS["pad_token"])
     seq_len = config.SEQ_LEN
 
@@ -242,6 +254,10 @@ def run_sft(
         volume.commit()
         print("Base model downloaded and cached on volume")
 
+    from transformers import AutoTokenizer
+    base_tokenizer = AutoTokenizer.from_pretrained(config.BASE_CKPT_DIR)
+    pad_id = base_tokenizer.convert_tokens_to_ids(config.SPECIAL_TOKENS["pad_token"])
+
     start_epoch = 0
     resume_ckpt = None
 
@@ -270,6 +286,10 @@ def run_sft(
     else:
         model = LlamaForCausalLM.from_pretrained(config.BASE_CKPT_DIR, torch_dtype=torch.bfloat16)
         print(f"Loaded fresh base model from {config.HF_REPO}")
+
+    model.config.bos_token_id = base_tokenizer.bos_token_id
+    model.config.eos_token_id = base_tokenizer.eos_token_id
+    model.config.pad_token_id = base_tokenizer.pad_token_id
 
     model = model.to(device=device)
     n_params = sum(p.numel() for p in model.parameters())
@@ -322,8 +342,9 @@ def run_sft(
         with torch.no_grad():
             for ids, labs in val_dl:
                 ids, labs = ids.to(device), labs.to(device)
+                mask = (ids != pad_id).long().to(device)
                 with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                    loss = model(input_ids=ids, labels=labs).loss
+                    loss = model(input_ids=ids, attention_mask=mask, labels=labs).loss
                 total_loss += loss.item() * ids.size(0)
                 total_count += ids.size(0)
         model.train()
@@ -371,8 +392,9 @@ def run_sft(
 
         for ids, labs in train_dl:
             ids, labs = ids.to(device), labs.to(device)
+            mask = (ids != pad_id).long().to(device)
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                loss = model(input_ids=ids, labels=labs).loss / grad_accum
+                loss = model(input_ids=ids, attention_mask=mask, labels=labs).loss / grad_accum
             loss.backward()
             running_loss_step += loss.item()
             epoch_train_loss += loss.item()

@@ -29,7 +29,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset, random_split
 from transformers import AutoTokenizer, LlamaForCausalLM
 
-MODEL_DIR = "local_model/sft_best"
+MODEL_DIR = "local_model/base"
 TOKENS_DIR = "local_model/tokens"
 METRICS_PATH = "local_model/sft_local_metrics.jsonl"
 CKPT_DIR = "local_model/checkpoints"
@@ -39,20 +39,84 @@ VOLUME_NAME = "slm-125m"
 IGNORE_INDEX = -100
 
 
-def download_tokens():
-    """Download tokenized SFT data from Modal volume if not present."""
-    os.makedirs(TOKENS_DIR, exist_ok=True)
-    for fname in ("input_ids.npy", "labels.npy"):
-        local_path = f"{TOKENS_DIR}/{fname}"
-        if os.path.exists(local_path):
+def _tokenize_chat(messages, tokenizer):
+    """Tokenize a chat conversation, returning input_ids and labels."""
+    role_map = {
+        "system": "<|system|>",
+        "user": "<|user|>",
+        "assistant": "<|assistant|>",
+    }
+    eos_id = tokenizer.convert_tokens_to_ids("<|eos|>")
+    input_ids = []
+    labels = []
+    for msg in messages:
+        role_id = tokenizer.convert_tokens_to_ids(role_map[msg["role"]])
+        content_ids = tokenizer.encode(msg["content"], add_special_tokens=False)
+        turn_ids = [role_id] + content_ids + [eos_id]
+        if msg["role"] == "assistant":
+            turn_labels = [IGNORE_INDEX] + content_ids + [eos_id]
+        else:
+            turn_labels = [IGNORE_INDEX] * len(turn_ids)
+        input_ids.extend(turn_ids)
+        labels.extend(turn_labels)
+    return input_ids, labels
+
+
+def tokenize_locally(tokenizer, seq_len=1024):
+    """Tokenize SFT data locally using the base model's tokenizer."""
+    import json as _json
+    sft_path = "data/sft_train.jsonl"
+    pad_id = tokenizer.convert_tokens_to_ids("<|pad|>")
+
+    with open(sft_path, encoding="utf-8") as fh:
+        examples = [_json.loads(line) for line in fh]
+    print(f"Tokenizing {len(examples)} examples locally (seq_len={seq_len})...")
+
+    all_input_ids, all_labels = [], []
+    skipped_short = 0
+    for ex in examples:
+        input_ids, labels = _tokenize_chat(ex["messages"], tokenizer)
+        if len(input_ids) > seq_len:
+            input_ids = input_ids[:seq_len]
+            labels = labels[:seq_len]
+        if len(input_ids) < 20:
+            skipped_short += 1
             continue
-        print(f"Downloading {fname} from Modal volume...")
-        subprocess.run(
-            ["modal", "volume", "get", VOLUME_NAME,
-             f"sft/tokens/{fname}", local_path],
-            check=True,
-        )
-    print("Tokenized data ready")
+        pad_len = seq_len - len(input_ids)
+        input_ids = input_ids + [pad_id] * pad_len
+        labels = labels + [IGNORE_INDEX] * pad_len
+        all_input_ids.append(input_ids)
+        all_labels.append(labels)
+
+    if not all_input_ids:
+        raise ValueError(f"No valid examples after tokenization ({len(examples)} input)")
+
+    os.makedirs(TOKENS_DIR, exist_ok=True)
+    np.save(f"{TOKENS_DIR}/input_ids.npy", np.array(all_input_ids, dtype=np.int32))
+    np.save(f"{TOKENS_DIR}/labels.npy", np.array(all_labels, dtype=np.int32))
+    print(f"Tokenized {len(all_input_ids)} examples (skipped {skipped_short} short)")
+
+
+def download_tokens(tokenizer):
+    """Tokenize locally if .npy files missing, or download from Modal."""
+    ids_path = f"{TOKENS_DIR}/input_ids.npy"
+    if os.path.exists(ids_path):
+        print("Tokenized data ready")
+        return
+    sft_path = "data/sft_train.jsonl"
+    if os.path.exists(sft_path):
+        tokenize_locally(tokenizer)
+    else:
+        os.makedirs(TOKENS_DIR, exist_ok=True)
+        for fname in ("input_ids.npy", "labels.npy"):
+            local_path = f"{TOKENS_DIR}/{fname}"
+            print(f"Downloading {fname} from Modal volume...")
+            subprocess.run(
+                ["modal", "volume", "get", VOLUME_NAME,
+                 f"sft/tokens/{fname}", local_path],
+                check=True,
+            )
+        print("Tokenized data ready")
 
 
 class SFTDataset(Dataset):
@@ -76,16 +140,18 @@ class SFTDataset(Dataset):
         return torch.from_numpy(ids), torch.from_numpy(labs)
 
 
-def collate_fn(batch):
+def collate_fn(batch, pad_id=2):
     """Dynamic padding — pad to longest in batch, not to 1024."""
     ids_list, _ = zip(*batch)
     max_len = max(x.size(0) for x in ids_list)
-    padded_ids = torch.zeros(len(batch), max_len, dtype=torch.long)
+    padded_ids = torch.full((len(batch), max_len), pad_id, dtype=torch.long)
     padded_labs = torch.full((len(batch), max_len), IGNORE_INDEX, dtype=torch.long)
+    attn_mask = torch.zeros(len(batch), max_len, dtype=torch.long)
     for i, (ids, labs) in enumerate(batch):
         padded_ids[i, :ids.size(0)] = ids
         padded_labs[i, :labs.size(0)] = labs
-    return padded_ids, padded_labs
+        attn_mask[i, :ids.size(0)] = 1
+    return padded_ids, padded_labs, attn_mask
 
 
 def get_device(requested: str | None) -> torch.device:
@@ -100,9 +166,9 @@ def evaluate(model, val_dl, device):
     model.eval()
     total_loss = total_count = 0
     with torch.no_grad():
-        for ids, labs in val_dl:
-            ids, labs = ids.to(device), labs.to(device)
-            loss = model(input_ids=ids, labels=labs).loss
+        for ids, labs, mask in val_dl:
+            ids, labs, mask = ids.to(device), labs.to(device), mask.to(device)
+            loss = model(input_ids=ids, attention_mask=mask, labels=labs).loss
             total_loss += loss.item() * ids.size(0)
             total_count += ids.size(0)
     model.train()
@@ -168,15 +234,22 @@ def main():
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--ckpt-every-epochs", type=int, default=2,
                         help="Save checkpoint every N epochs")
+    parser.add_argument("--retokenize", action="store_true",
+                        help="Force re-tokenization of SFT data")
     args = parser.parse_args()
 
     device = get_device(args.device)
     print(f"Device: {device}")
 
-    download_tokens()
-
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     pad_id = tokenizer.convert_tokens_to_ids("<|pad|>")
+
+    if args.retokenize:
+        if os.path.exists(TOKENS_DIR):
+            shutil.rmtree(TOKENS_DIR)
+            print("Cleared old tokenized data")
+
+    download_tokens(tokenizer)
 
     input_ids = np.load(f"{TOKENS_DIR}/input_ids.npy")
     labels = np.load(f"{TOKENS_DIR}/labels.npy")
@@ -213,6 +286,10 @@ def main():
     else:
         print(f"Loading base model from {args.model}...")
         model = LlamaForCausalLM.from_pretrained(args.model, torch_dtype=torch.float32)
+
+    model.config.bos_token_id = tokenizer.bos_token_id
+    model.config.eos_token_id = tokenizer.eos_token_id
+    model.config.pad_token_id = pad_id
 
     model = model.to(device)
     model.train()
@@ -294,9 +371,9 @@ def main():
         epoch_train_loss = 0.0
         epoch_train_steps = 0
 
-        for ids, labs in train_dl:
-            ids, labs = ids.to(device), labs.to(device)
-            loss = model(input_ids=ids, labels=labs).loss / args.grad_accum
+        for ids, labs, mask in train_dl:
+            ids, labs, mask = ids.to(device), labs.to(device), mask.to(device)
+            loss = model(input_ids=ids, attention_mask=mask, labels=labs).loss / args.grad_accum
             loss.backward()
             running_loss += loss.item()
             epoch_train_loss += loss.item()

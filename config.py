@@ -7,7 +7,7 @@ from typing import Mapping
 
 # Project identity / paths (all paths are relative to the Modal Volume mount).
 PROJECT = "slm125mlive"
-HF_REPO = "Saliltrehan7/slm-125m-base"  # set to your own HF namespace for Phase 6
+HF_REPO = "thesreedath/slm-125m-base"
 
 VOLUME_NAME = "slm-125m"
 DATA_ROOT = "/data"
